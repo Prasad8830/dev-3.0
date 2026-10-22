@@ -180,6 +180,16 @@ export default function TaskContextMenu({
 		}
 	}
 
+	async function handleToggleKeepAlive() {
+		onClose();
+		try {
+			const updated = await api.request.setTaskKeepAlive({ taskId: task.id, projectId: project.id, enabled: !task.keepAlive?.enabled });
+			dispatch({ type: "updateTask", task: updated });
+		} catch (err) {
+			toast.error(t("task.keepAliveFailed", { error: String(err) }), { taskId: task.id });
+		}
+	}
+
 	async function handleHibernate() {
 		onClose();
 		const paneCount = task.sessionState?.panes?.length ?? 0;
@@ -270,6 +280,12 @@ export default function TaskContextMenu({
 				label: task.hidden ? t("task.showInSidebar") : t("task.hideFromSidebar"),
 				onSelect: handleToggleHidden,
 				checked: task.hidden,
+			},
+			{
+				// The label names the action it will perform, so a checkmark would be redundant.
+				id: "keepAlive",
+				label: task.keepAlive?.enabled ? t("task.keepAliveOff") : t("task.keepAliveOn"),
+				onSelect: handleToggleKeepAlive,
 			},
 			{ id: "hibernate", label: t("task.hibernate"), onSelect: handleHibernate, disabled: !hasSession },
 		],
