@@ -1,3 +1,5 @@
+import type { PrStatusNotice, PrWatchUntil } from "./pr-watch";
+import { parseGitHubPullRequestUrl } from "./pr-status";
 import { ID_PREFIX_MIN_LENGTH, type AgentMessageSource } from "./types";
 
 /**
@@ -93,6 +95,73 @@ export function wrapArtifactMessage(
 		"</message>",
 		"</dev3-artifact-message>",
 	].join("\n");
+}
+
+function prNoticeSentence(prNumber: number, notice: PrStatusNotice, completionOffered: boolean): string {
+	switch (notice.kind) {
+		case "merged":
+			return completionOffered
+				? `PR #${prNumber} merged. dev3 handles the completion offer; do not request task completion yourself.`
+				: `PR #${prNumber} merged. dev3 does not offer completion for this task; continue per your task rules.`;
+		case "replaced":
+			return `PR #${notice.oldNumber} is no longer this branch's open PR; watch ended. Run \`dev3 pr watch\` again if you still need it.`;
+		case "closed":
+			return `PR #${prNumber} closed without merge.`;
+		case "ci-passed":
+			return `PR #${prNumber}: CI finished on ${notice.sha.slice(0, 7)}: all ${notice.totalChecks} checks GitHub listed passed.`;
+		case "ci-failed":
+			// No check names: they are written by whoever owns the workflow file, and this text lands in the agent's prompt.
+			return `PR #${prNumber}: CI finished on ${notice.sha.slice(0, 7)}: ${notice.failedCount} of ${notice.totalChecks} checks GitHub listed failed; see \`gh pr checks ${prNumber}\`.`;
+	}
+}
+
+const PR_NOTICE_SUBJECT: Record<PrStatusNotice["kind"], string> = {
+	"ci-passed": "CI passed",
+	"ci-failed": "CI failed",
+	merged: "merged",
+	closed: "closed without merge",
+	replaced: "watch ended",
+};
+
+/** Only the exact `https://<host>/<owner>/<repo>/pull/<N>` shape of this PR goes into the message. */
+function isPlainPullRequestUrl(url: string, prNumber: number): boolean {
+	const repo = parseGitHubPullRequestUrl(url);
+	return repo !== null && url === `https://${repo.host}/${repo.owner}/${repo.repo}/pull/${prNumber}`;
+}
+
+/** The agent-traffic-log subject for a PR status message. */
+export function prStatusSubject(prNumber: number, notices: readonly PrStatusNotice[]): string {
+	const first = notices[0];
+	if (first?.kind === "replaced") return `PR #${first.oldNumber}: ${PR_NOTICE_SUBJECT.replaced}`;
+	return `PR #${prNumber}: ${first ? PR_NOTICE_SUBJECT[first.kind] : "status"}`;
+}
+
+/**
+ * The message dev3 itself types into an agent's pane when a `dev3 pr watch`
+ * subscription fires. Not a task talking, so no `<reply-with>`.
+ *
+ * Only dev3's own words, the PR number, its URL, a short SHA and check counts go
+ * in. Never the PR title, a review or a comment: fork authors write those, and this
+ * text lands in the agent's prompt. It must stay under
+ * `AGENT_MESSAGE_SPILL_THRESHOLD_BYTES`.
+ */
+export function wrapPrStatusMessage(input: {
+	prNumber: number;
+	url: string;
+	notices: readonly PrStatusNotice[];
+	/** Kinds of watch that remain on the task after this message. */
+	remaining: readonly PrWatchUntil[];
+	/** False when the merge path only posts a notice (manual completion, or the offer switched off). */
+	completionOffered: boolean;
+}): string {
+	const sentences = [...new Set(input.notices.map((notice) => prNoticeSentence(input.prNumber, notice, input.completionOffered)))];
+	const lines = ["<dev3-pr-status>", ...sentences];
+	if (isPlainPullRequestUrl(input.url, input.prNumber)) lines.push(input.url);
+	lines.push(
+		`${input.remaining.length > 0 ? `Watch until ${input.remaining.join(" and ")} stays active.` : "No watch is left."} Act per your task rules.`,
+		"</dev3-pr-status>",
+	);
+	return lines.join("\n");
 }
 
 /**

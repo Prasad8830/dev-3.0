@@ -1675,6 +1675,47 @@ export async function getHeadSha(worktreePath: string): Promise<string | null> {
 	return result.stdout.trim() || null;
 }
 
+/** Is `sha` a commit this repository has? A foreign push is not, until somebody fetches. */
+export async function commitExists(worktreePath: string, sha: string): Promise<boolean> {
+	return (await run(["git", "cat-file", "-e", `${sha}^{commit}`], worktreePath)).ok;
+}
+
+/**
+ * What the remotes last had for `branch`, as the one authoritative answer: the
+ * remote-tracking ref(s) (`refs/remotes/<remote>/<branch>`) updated most recently, by
+ * reflog time. With several remotes holding the branch name one ref can be left stale;
+ * "any ref" would read its old commit as current. A ref without a reflog time is ignored
+ * while another has one. Not the upstream, which on a task branch is usually `origin/main`.
+ * `ambiguous` is true when the newest refs (or, with no reflog times, all refs) disagree.
+ */
+export async function getRemoteBranchTips(worktreePath: string, branch: string): Promise<{ tips: string[]; ambiguous: boolean }> {
+	const result = await run(
+		["git", "for-each-ref", "--format=%(refname) %(objectname)", `refs/remotes/*/${branch}`],
+		worktreePath,
+	);
+	if (!result.ok) return { tips: [], ambiguous: false };
+	// The glob also matches a deeper path (`refs/remotes/a/b/<branch>`); keep only `<remote>/<branch>`.
+	const refs = result.stdout.split("\n").flatMap((line) => {
+		const [ref = "", sha = ""] = line.trim().split(" ");
+		const rest = ref.slice("refs/remotes/".length);
+		return sha && rest.slice(rest.indexOf("/") + 1) === branch ? [{ ref, sha }] : [];
+	});
+	const distinct = (shas: string[]) => {
+		const tips = [...new Set(shas)];
+		return { tips, ambiguous: tips.length > 1 };
+	};
+	if (refs.length <= 1) return distinct(refs.map(({ sha }) => sha));
+	const timed = await Promise.all(refs.map(async ({ ref, sha }) => {
+		const log = await run(["git", "log", "-g", "-1", "--date=unix", "--format=%gd", ref], worktreePath);
+		const time = log.ok ? Number.parseInt(/@\{(\d+)\}$/.exec(log.stdout.trim())?.[1] ?? "", 10) : Number.NaN;
+		return { sha, time };
+	}));
+	const known = timed.filter(({ time }) => Number.isFinite(time));
+	if (known.length === 0) return distinct(refs.map(({ sha }) => sha));
+	const newest = Math.max(...known.map(({ time }) => time));
+	return distinct(known.filter(({ time }) => time === newest).map(({ sha }) => sha));
+}
+
 export async function isWorktreeDirty(worktreePath: string): Promise<boolean> {
 	const result = await run(["git", "status", "--porcelain"], worktreePath);
 	if (!result.ok) return false;
