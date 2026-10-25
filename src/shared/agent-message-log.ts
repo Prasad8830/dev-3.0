@@ -107,6 +107,9 @@ export interface AgentMessageLogRow {
 	body: string;
 	bodyKind: AgentMessageBodyKind;
 	spillPath?: string;
+	/** The pane it went to, and which of the task's agents runs there, when known. Additive. */
+	toPaneId?: string;
+	toAgentRole?: "main" | "agent" | "review";
 	/** The delivery verdict — `unconfirmed` is its own answer, never folded away. */
 	status: AgentPromptDeliveryStatus;
 	reason?: string;

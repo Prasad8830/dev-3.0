@@ -84,9 +84,13 @@ beforeEach(() => {
 	}) as ReturnType<typeof vi.spyOn>;
 	mockSend.mockReset();
 	mockReadStdin.mockReset();
+	// The suite may itself run inside a tmux pane; only the tests about panes set one.
+	vi.stubEnv("TMUX_PANE", "");
+	vi.stubEnv("DEV3_PANE_ID", "");
 });
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	stdoutSpy.mockRestore();
 	stderrSpy.mockRestore();
 	exitSpy.mockRestore();
@@ -2252,6 +2256,14 @@ describe("task move — agent asking to start another task", () => {
 			sourceTaskId: CTX.taskId,
 		});
 	});
+
+	it("names its own pane and pid, so the task it launches can reply to THIS agent", async () => {
+		vi.stubEnv("TMUX_PANE", "%3");
+		mockSend.mockResolvedValue(okResp({ ...FAKE_TASK, status: "in-progress" as const }));
+		await handleTask("move", args([], { task: OTHER, status: "in-progress" }), SOCKET, CTX);
+		const move = mockSend.mock.calls.find(([, method]) => method === "task.move");
+		expect(move?.[2]).toMatchObject({ sourceTaskId: CTX.taskId, sourcePaneId: "%3", sourcePid: process.pid });
+	});
 });
 
 describe("task create --scratch --run", () => {
@@ -2298,6 +2310,14 @@ describe("task create --scratch --run", () => {
 			{ timeoutMs: 10 * 60 * 1000 },
 		);
 		expect(stdoutOutput).toContain("seq:91");
+	});
+
+	it("names its own pane and pid, so the scratch peer can reply to THIS agent", async () => {
+		vi.stubEnv("DEV3_PANE_ID", "pane-2");
+		mockSend.mockResolvedValue(okResp({ approved: true, seq: 91, title: "Scratch — 14:32" }));
+		await handleTask("create", args([], { scratch: "true", run: "true" }), SOCKET, CTX);
+		const launch = mockSend.mock.calls.find(([, method]) => method === "task.createScratchAndRun");
+		expect(launch?.[2]).toEqual({ projectId: "proj-001", sourceTaskId: CTX.taskId, sourcePaneId: "pane-2", sourcePid: process.pid });
 	});
 
 	it("passes --agent/--config as the dialog's suggested choice", async () => {

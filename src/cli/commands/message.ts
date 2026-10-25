@@ -9,6 +9,8 @@ import { singleTextInput } from "../text-input";
 import { parseDelay, formatCountdown } from "../../shared/duration";
 import { describeScheduledTime, parseScheduleAt } from "../../shared/schedule-at";
 import { handleScheduledQueue, isScheduledQueueCommand } from "./message-schedule";
+import { decodeAgentHandle } from "../../shared/agent-handle";
+import { senderAgentParams } from "../sender-agent";
 import { MAX_SCHEDULED_MESSAGE_LENGTH } from "../../shared/types";
 import type { AgentPromptDeliveryStatus } from "../../shared/agent-prompt-delivery";
 import {
@@ -21,8 +23,34 @@ import {
 } from "../../shared/agent-message-hold-timing";
 
 const USAGE =
-	'Usage: dev3 message --subject "<what it is about>" "text" [--in <dur> | --at <hh:mm[Z|±hh:mm]>] [--task <id>] [--variant <i>]\n' +
+	'Usage: dev3 message --subject "<what it is about>" "text" [--in <dur> | --at <hh:mm[Z|±hh:mm]>] [--task <id>] [--variant <i>] [--agent <handle>]\n' +
 	"       dev3 message --list [--json] [--task <id>]   |   dev3 message --cancel <id> [--task <id>]";
+
+/** How a delivery names the agent it reached, by the role dev3 launched it in. */
+const AGENT_ROLE_LABELS: Record<string, string> = { main: "main agent", agent: "extra agent", review: "AI Review agent" };
+
+/**
+ * `--agent <handle>` — one agent of the target task, as `dev3 pane list` prints it.
+ * Checked here for shape; the app checks it is still that agent, and refuses rather
+ * than falling back to the task when it is not.
+ */
+function parseAgentFlag(raw: unknown): string | undefined {
+	if (raw === undefined) return undefined;
+	const value = String(raw).trim();
+	if (value === "" || value === "true") exitUsage("--agent needs a handle. Copy one from `dev3 pane list --task <id>`.");
+	if (!decodeAgentHandle(value)) exitUsage(`"${value}" is not an agent handle. Copy one from \`dev3 pane list --task <id>\`.`);
+	if (process.platform === "win32") {
+		exitError("--agent is not available on Windows yet: agent identity cannot be verified there. Nothing was sent.");
+	}
+	return value;
+}
+
+/** Said whenever a peer will get this message with no way to answer this agent. */
+function replyUnavailableNotice(reason: unknown): string {
+	return typeof reason === "string" && reason
+		? `Replies to you are not available (${reason}): the message carries no reply command.\n`
+		: "";
+}
 
 const VARIANT_NEEDS_SEQ =
 	"--variant narrows a variant group addressed by seq. Pass --task seq:<N> --variant <i>.";
@@ -52,6 +80,7 @@ function targetFlags(args: ParsedArgs): string {
 	const task = args.flags.task || args.flags["task-id"];
 	if (task) parts.push(`--task ${task}`);
 	if (args.flags.variant && args.flags.variant !== "true") parts.push(`--variant ${args.flags.variant}`);
+	if (args.flags.agent && args.flags.agent !== "true") parts.push(`--agent ${args.flags.agent}`);
 	if (args.flags.project && args.flags.project !== "true") parts.push(`--project ${args.flags.project}`);
 	if (args.flags.in && args.flags.in !== "true") parts.push(`--in ${args.flags.in}`);
 	if (args.flags.at && args.flags.at !== "true") parts.push(`--at ${args.flags.at}`);
@@ -87,6 +116,7 @@ function requireSubject(args: ParsedArgs, text: string): string {
  * `--at <hh:mm>` (next occurrence today/tomorrow) queues it as a scheduled
  * message. Task auto-detected from the worktree; `--task`/`--project` override.
  * Text can be a positional arg, `--message`, `-` (stdin), or `@file` — one of them.
+ * It goes to the task's main agent, or with `--agent <handle>` to that one agent.
  *
  * `--subject` is required on every form, immediate and scheduled alike: it is
  * stored with the message and it is the line the agent-traffic view renders.
@@ -97,7 +127,7 @@ export async function handleMessage(
 	context: CliContext | null,
 ): Promise<void> {
 	if (isScheduledQueueCommand(args)) return handleScheduledQueue(args, socketPath, context);
-	rejectUnknownFlags(args, ["task", "task-id", "project", "in", "at", "message", "variant", "subject"]);
+	rejectUnknownFlags(args, ["task", "task-id", "project", "in", "at", "message", "variant", "subject", "agent"]);
 
 	const rawText = singleTextInput(args, "message") ?? "";
 	const text = (rawText === "-" ? await readStdin() : rawText).trim();
@@ -127,27 +157,41 @@ export async function handleMessage(
 	// filter to apply silently.
 	if (variantIndex !== undefined && !/^seq:\d+$/.test(String(rawTaskId))) exitUsage(VARIANT_NEEDS_SEQ);
 
+	const agentHandle = parseAgentFlag(args.flags.agent);
+
 	const params: Record<string, unknown> = { taskId: expandShortId(rawTaskId, context), text, subject };
 	if (variantIndex !== undefined) params.variantIndex = variantIndex;
+	if (agentHandle) params.agentHandle = agentHandle;
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (projectId) params.projectId = projectId;
 	// Running inside a worktree means an agent is the author: hand the app our own
 	// task id so it can wrap the text in the cross-task envelope (it resolves both
 	// ends and skips wrapping when a task messages itself).
 	if (context?.taskId) params.sourceTaskId = context.taskId;
+	Object.assign(params, senderAgentParams(context));
 
 	// Bare form → send immediately.
 	if (!hasIn && !hasAt) {
 		const resp = await sendRequest(socketPath, "message.send", params);
 		if (!resp.ok) exitError(resp.error || "Failed to send message");
-		const data = resp.data as { taskId: string; status?: AgentPromptDeliveryStatus; detail?: string };
+		const data = resp.data as {
+			taskId: string;
+			status?: AgentPromptDeliveryStatus;
+			detail?: string;
+			paneId?: string;
+			agentRole?: string;
+			replyUnavailable?: string;
+		};
 		const shortId = data.taskId.slice(0, 8);
+		const role = data.agentRole ? AGENT_ROLE_LABELS[data.agentRole] : undefined;
+		const recipient = data.paneId ? ` (${role ? `${role}, ` : ""}pane ${data.paneId})` : "";
+		process.stderr.write(replyUnavailableNotice(data.replyUnavailable));
 		// "Unconfirmed" is its own exit code, never an error: the text may well have
 		// landed, and an agent that read a failure here would re-send it — a second
 		// submit into a live agent is worse than not knowing.
 		if (data.status === "unconfirmed") {
 			process.stdout.write(
-				`Message sent to task ${shortId}, but delivery could not be confirmed${data.detail ? ` (${data.detail})` : ""}. ` +
+				`Message sent to task ${shortId}${recipient}, but delivery could not be confirmed${data.detail ? ` (${data.detail})` : ""}. ` +
 					`Check the task's terminal before sending it again.\n`,
 			);
 			process.exit(CLI_EXIT_CODE_DELIVERY_UNCONFIRMED);
@@ -156,7 +200,7 @@ export async function handleMessage(
 		// reading it now". The whole message waits for the pane to go quiet, so it can
 		// never land in the middle of a line the user is writing.
 		process.stdout.write(
-			`Message queued for task ${shortId}. It lands after ${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that ` +
+			`Message queued for task ${shortId}${recipient}. It lands after ${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that ` +
 				`pane — ${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing there, at once when they ` +
 				`press Enter — and anything else sent meanwhile arrives in the same turn.\n`,
 		);
@@ -182,17 +226,11 @@ export async function handleMessage(
 	}
 
 	params.at = at.toISOString();
-	// Our pane and pid, so a reminder an agent schedules for its own task comes back
-	// to that agent rather than to a sibling. The app decides whether it applies.
-	const sourcePaneId = context?.taskId ? (process.env.TMUX_PANE?.trim() || process.env.DEV3_PANE_ID?.trim()) : undefined;
-	if (sourcePaneId) {
-		params.sourcePaneId = sourcePaneId;
-		params.sourcePid = process.pid;
-	}
 	const resp = await sendRequest(socketPath, "message.schedule", params);
 	if (!resp.ok) exitError(resp.error || "Failed to schedule message");
-	const data = resp.data as { taskId: string; pending: number; messageId?: string };
+	const data = resp.data as { taskId: string; pending: number; messageId?: string; replyUnavailable?: string };
 	const shortTask = data.taskId.slice(0, 8);
+	process.stderr.write(replyUnavailableNotice(data.replyUnavailable));
 	process.stdout.write(
 		`Message scheduled for ${describeScheduledTime(at, now)} (in ${formatCountdown(at.getTime() - now)}) on task ${shortTask}.\n`,
 	);

@@ -20,8 +20,9 @@ export function handoffReportsDir(project: Parameters<typeof taskDir>[0], task: 
 
 /**
  * The note an agent-launched task receives as its first message. The cross-task
- * envelope already carries the sender's `seq` and the reply command, so the body
- * only establishes who started this task and how to answer.
+ * envelope already carries the sender's `seq` and, when the sending agent was
+ * proven, the reply command, so the body only says who started this task and how
+ * to answer.
  *
  * File-based reporting is the DEFAULT, not a coordinator's private convention:
  * a report is long, and a long body typed into a pane can lose its head
@@ -39,7 +40,7 @@ export function buildHandoffMessage(reportsDir: string, launcherNote?: string | 
 		`Report progress and your final result as a FILE under ${reportsDir}/ , then message back ` +
 		"only its absolute path plus one line saying what it is — a short message always arrives whole, " +
 		"a long one can lose its head. Questions and one-line status still go straight in a message, " +
-		"with the reply command below.",
+		"with the envelope's reply command when it carries one.",
 	];
 	const note = launcherNote?.trim();
 	if (note) parts.push(`Standing instructions from your launcher:\n${note}`);
