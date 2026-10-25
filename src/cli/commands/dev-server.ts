@@ -146,23 +146,19 @@ function looksLikeTaskRef(raw: string): boolean {
  * still does when it looks like one. A dev server's name (lowercase letters,
  * digits and dashes — `api`, `back-office`) cannot be confused with a task id,
  * so it may be written plainly; `--server` settles the rare overlap of a server
- * whose name is also hex, such as `abcdef`.
+ * whose name is also hex, such as `abcdef`. Once a task flag names the task, a
+ * positional can only be the server — `--task X abcdef` means server `abcdef`.
  */
 function resolveTarget(args: ParsedArgs, context: CliContext | null): { taskId?: string; server?: string } {
 	const positionals = args.positional.filter((value) => value.length > 0);
 	const flagServer = args.flags.server;
-	const flagTask = args.flags.task || args.flags["task-id"] || args.flags.id;
-	let positionalTask: string | undefined;
+	let taskRef = args.flags.task || args.flags["task-id"] || args.flags.id;
 	let server = typeof flagServer === "string" && flagServer !== "true" ? flagServer : undefined;
 	for (const value of positionals) {
-		if (!positionalTask && looksLikeTaskRef(value)) positionalTask = value;
+		if (!taskRef && looksLikeTaskRef(value)) taskRef = value;
 		else if (!server) server = value;
 		else exitUsage(`Unexpected argument: ${value}`);
 	}
-	if (flagTask && positionalTask && flagTask !== positionalTask) {
-		exitUsage(`Two different tasks given: --task ${flagTask} and ${positionalTask} — pass one`);
-	}
-	const taskRef = flagTask || positionalTask;
 	if (server && !DEV_SERVER_NAME_PATTERN.test(server)) {
 		exitUsage(`"${server}" is not a valid dev server name (lowercase letters, digits and dashes)`);
 	}

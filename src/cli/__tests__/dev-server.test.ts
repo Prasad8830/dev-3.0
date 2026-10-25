@@ -156,19 +156,14 @@ describe("dev-server status", () => {
 		}, { retryEmptyResponse: true });
 	});
 
-	it("accepts --task and a positional task when they agree", async () => {
-		mockSend.mockResolvedValue(okResp(STATUS));
+	// Regression: a hex positional next to a task flag became a second task and
+	// exited 3; before --task existed, `--id X abcdef` meant server `abcdef`.
+	it.each(["--task", "--id"])("treats a hex positional after %s as the server name", async (flag) => {
+		mockSend.mockResolvedValue(okResp(withServer({ name: "abcdef" })));
 
-		await handleDevServer("status", parseArgs(["bbbbbbbb", "--task", "bbbbbbbb"]), SOCKET, CTX);
+		await handleDevServer("stop", parseArgs([flag, "bbbbbbbb", "abcdef"]), SOCKET, CTX);
 
-		expect(mockSend).toHaveBeenCalledWith(SOCKET, "devServer.status", expect.objectContaining({ taskId: "bbbbbbbb" }), { retryEmptyResponse: true });
-	});
-
-	it("rejects --task and a different positional task instead of picking one", async () => {
-		await expect(
-			handleDevServer("status", parseArgs(["cccccccc", "--task", "bbbbbbbb"]), SOCKET, CTX),
-		).rejects.toThrow("EXIT_3");
-		expect(mockSend).not.toHaveBeenCalled();
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "devServer.stop", expect.objectContaining({ taskId: "bbbbbbbb", server: "abcdef" }), { retryEmptyResponse: true });
 	});
 
 	// Regression: `dev3 dev-server status` used to crash with

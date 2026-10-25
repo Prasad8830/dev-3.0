@@ -190,8 +190,9 @@ vi.mock("../dev-server-env-store", () => ({
 }));
 
 
-vi.mock("../dev-server-script", () => ({
+vi.mock("../dev-server-script", async (importOriginal) => ({
 	buildDevServerScript: vi.fn(() => "#!/bin/bash\n"),
+	scriptArgsProblem: (await importOriginal<typeof import("../dev-server-script")>()).scriptArgsProblem,
 }));
 
 // An in-memory stand-in for the on-disk store, so the handler's own read/save/
@@ -446,6 +447,22 @@ describe("dev-server script args", () => {
 			restartDevServer({ taskId: TASK_ID, projectId: "proj-1", args: args as unknown as string[] }),
 		).rejects.toThrow("list of strings");
 		expect(buildDevServerScript).not.toHaveBeenCalled();
+	});
+
+	it("refuses args the script's last line cannot take, keeping the previous ones", async () => {
+		await runDevServer({ taskId: TASK_ID, projectId: "proj-1", args: ["--own-db"] });
+		vi.mocked(buildDevServerScript).mockClear();
+		vi.mocked(resolveOperationalProjectConfig).mockResolvedValue({
+			devScript: "bun run dev &",
+			portCount: 1,
+			env: PROJECT_ENV,
+		} as unknown as Awaited<ReturnType<typeof resolveOperationalProjectConfig>>);
+
+		await expect(
+			runDevServer({ taskId: TASK_ID, projectId: "proj-1", args: ["--other"] }),
+		).rejects.toThrow('ends with "&"');
+		expect(buildDevServerScript).not.toHaveBeenCalled();
+		expect(readDevServerArgs(TASK_ID, "dev")).toEqual(["--own-db"]);
 	});
 
 	it("rejects args together with all", async () => {

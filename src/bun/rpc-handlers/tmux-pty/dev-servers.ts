@@ -19,7 +19,7 @@ import { nativeTaskPaneCommands } from "../../native-task-panes";
 import { auxPaneAlive, auxPaneTitle, closeAuxPane, findAuxPane, nativeAuxPaneShellPid, openAuxPane } from "../../task-aux-panes";
 import { buildTaskLifecycleEnv, shellQuote, generatedScriptLaunch, generatedScriptName, log, writeLaunchScript } from "../shared-pure";
 import { assertPosixLaunchDialect } from "../../../shared/platform-launch";
-import { buildDevServerScript } from "../../dev-server-script";
+import { buildDevServerScript, scriptArgsProblem } from "../../dev-server-script";
 import { resetDevServerLog } from "../../dev-server-log";
 import { devServerLogPath, DEV_SERVER_LOG_SINK_VERB } from "../../../shared/dev-server-log";
 import { dev3CliExecutable } from "../../task-pane-runs";
@@ -769,8 +769,10 @@ async function startOneDevServer(
 	// Never trust the caller: `devServer.start` is reachable from the CLI, the
 	// renderer, and any other socket client, and only the CLI validates.
 	const callerEnv = sanitizeDevServerEnv(env);
-	saveDevServerEnv(task.id, server.name, callerEnv);
 	const scriptArgs = args ?? [];
+	const argsProblem = scriptArgs.length > 0 ? scriptArgsProblem(server.script) : null;
+	if (argsProblem) throw new Error(argsProblem);
+	saveDevServerEnv(task.id, server.name, callerEnv);
 	saveDevServerArgs(task.id, server.name, scriptArgs);
 
 	const devSession = devServerSessionName(task.id, server.name);

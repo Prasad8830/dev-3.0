@@ -62,7 +62,8 @@ interface DevServerMenuProps {
 function DevServerMenu({ position, scriptArgs, onRestart, onStop, onClose }: DevServerMenuProps) {
 	const t = useT();
 	const menuRef = useRef<HTMLDivElement>(null);
-	const { position: menuPos, visible } = useViewportClamp(menuRef, position);
+	const argsText = formatDevServerArgs(scriptArgs);
+	const { position: menuPos, visible } = useViewportClamp(menuRef, position, argsText);
 
 	useEscapeKey(onClose);
 	useEffect(() => {
@@ -80,7 +81,7 @@ function DevServerMenu({ position, scriptArgs, onRestart, onStop, onClose }: Dev
 	return (
 		<div
 			ref={menuRef}
-			className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-1.5 min-w-[11.25rem]"
+			className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-1.5 min-w-[11.25rem] w-max"
 			style={{ top: menuPos.top, left: menuPos.left, visibility: visible ? "visible" : "hidden" }}
 			onClick={(event) => event.stopPropagation()}
 		>
@@ -90,10 +91,10 @@ function DevServerMenu({ position, scriptArgs, onRestart, onStop, onClose }: Dev
 			{scriptArgs.length > 0 && (
 				<div
 					className="px-3 -mt-1 pb-2 font-mono text-xs text-fg-3 truncate max-w-[16rem]"
-					title={t("header.devServerArgsTitle", { args: formatDevServerArgs(scriptArgs) })}
+					title={t("header.devServerArgsTitle", { args: argsText })}
 					data-testid="dev-server-args"
 				>
-					{formatDevServerArgs(scriptArgs)}
+					{argsText}
 				</div>
 			)}
 			<button
@@ -138,7 +139,8 @@ interface DevServerListProps {
 function DevServerList({ position, servers, status, busy, onStart, onStop, onRestart, onStartAll, onStopAll, onClose }: DevServerListProps) {
 	const t = useT();
 	const menuRef = useRef<HTMLDivElement>(null);
-	const { position: menuPos, visible } = useViewportClamp(menuRef, position);
+	const argsKey = status?.servers.map((entry) => (entry.running ? formatDevServerArgs(entry.scriptArgs) : "")).join("\n");
+	const { position: menuPos, visible } = useViewportClamp(menuRef, position, argsKey);
 
 	useEscapeKey(onClose);
 	useEffect(() => {

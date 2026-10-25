@@ -613,7 +613,8 @@ const COMMANDS: CommandHelp[] = [
 					+ " --wait blocks until it is listening on a port assigned to it (default timeout 120s)."
 					+ " --env passes extra variables to the script (repeatable); it overrides the project's own env but never"
 					+ " DEV3_TASK_ID, DEV3_WORKTREE_ROOT or DEV3_PORT*."
-					+ " Arguments after -- are appended to the script, each shell-quoted; name one server (not --all)."
+					+ " Arguments after -- are appended to the script's last line (ahead of a trailing # comment), each shell-quoted;"
+					+ " a last line ending in &, |, ; or a block keyword is refused. Name one server (not --all)."
 					+ " `status` shows them in full, so pass secrets with --env.",
 			},
 			{

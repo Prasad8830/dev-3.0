@@ -18,7 +18,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildDevServerScript } from "../dev-server-script";
+import { buildDevServerScript, scriptArgsProblem } from "../dev-server-script";
 
 const realPlatform = process.platform;
 const realSystemRoot = process.env.SystemRoot;
@@ -142,6 +142,63 @@ describe("dev-server script args", () => {
 		asPlatform("darwin");
 		const withEmpty = buildDevServerScript({ devScript: DEV_SCRIPT, envGroups: [], scriptArgs: [] });
 		expect(withEmpty).toBe(buildDevServerScript({ devScript: DEV_SCRIPT, envGroups: [] }));
+	});
+
+	// Regression: args were glued onto the last line's TEXT, so a trailing comment
+	// swallowed them while status still reported them as passed.
+	it("puts the args ahead of a trailing comment", () => {
+		asPlatform("darwin");
+		const script = buildDevServerScript({ devScript: "cd web\nbun run dev # api", envGroups: [], scriptArgs: ["--x"] });
+		expect(script).toContain("\ncd web\nbun run dev '--x' # api\nEXIT_CODE=$?");
+	});
+
+	it("does not mistake a quoted or mid-word # for a comment", () => {
+		asPlatform("darwin");
+		const script = buildDevServerScript({ devScript: "bun run dev --tag '#a b' --url=x#y", envGroups: [], scriptArgs: ["--x"] });
+		expect(script).toContain("\nbun run dev --tag '#a b' --url=x#y '--x'\n");
+	});
+
+	it.each([
+		["bun run dev &", "ends with \"&\""],
+		["bun run dev | tee log", null],
+		["bun run dev |", "ends with \"|\""],
+		["bun run dev \\", "ends with \"\\\""],
+		["if true; then\n  bun run dev\nfi", "ends with \"fi\""],
+		["for i in 1; do bun run dev; done", "ends with \"done\""],
+		["( cd web && bun run dev )", "ends with \")\""],
+		["bun run dev\n# trailing note", "has no command on it"],
+		["echo 'unterminated", "ends inside an open quote"],
+		["bun run dev --cwd=$(pwd)", null],
+	])("judges the last line of %j", (devScript, reason) => {
+		asPlatform("darwin");
+		const problem = scriptArgsProblem(devScript);
+		if (reason === null) expect(problem).toBeNull();
+		else expect(problem).toContain(`that line ${reason}`);
+	});
+
+	it("refuses to build a script whose last line cannot take args", () => {
+		asPlatform("darwin");
+		expect(() => buildDevServerScript({ devScript: "bun run dev &", envGroups: [], scriptArgs: ["--x"] })).toThrow("ends with \"&\"");
+	});
+
+	it("uses the PowerShell escape character for a continuation on Windows", () => {
+		asPlatform("win32");
+		expect(scriptArgsProblem("bun run dev `")).toContain("ends with \"`\"");
+		expect(scriptArgsProblem("bun run dev C:\\web\\")).toBeNull();
+	});
+
+	it.skipIf(process.platform === "win32")("delivers args past a trailing comment under the real shell", () => {
+		asPlatform("darwin");
+		const dir = mkdtempSync(join(tmpdir(), "dev3-script-comment-"));
+		try {
+			const script = buildDevServerScript({ devScript: "printf '%s\\n' # api", envGroups: [], scriptArgs: ["a b", "c"] });
+			const file = join(dir, "run.sh");
+			writeFileSync(file, script);
+			const out = execFileSync("/bin/sh", [file], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+			expect(out.split("\n").slice(0, -1)).toEqual(["a b", "c"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	// Runs the generated file under the real shell: hostile args must arrive as
