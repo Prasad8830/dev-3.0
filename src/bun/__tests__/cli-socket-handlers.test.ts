@@ -451,6 +451,67 @@ describe("message.send / message.schedule — the subject gate", () => {
 	});
 });
 
+vi.mock("../external-senders", () => ({
+	requireExternalSender: vi.fn((id: string) => {
+		if (id !== "cli") throw new Error(`Unknown external sender "${id}".`);
+		return { id, label: "CLI" };
+	}),
+}));
+
+describe("message.send / message.sendAsSender — the sender guards", () => {
+	// These keep a sender's message out of tasks.json and away from a task's own
+	// identity; the CLI refuses the same shapes first, but other socket clients exist.
+	beforeEach(() => {
+		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([makeTask()]);
+	});
+	const base = () => ({ taskId: makeTask().id, projectId: "proj-1", text: "ping", subject: "s" });
+
+	it("sends as the sender only on message.sendAsSender", async () => {
+		const resp = await handleRequest(makeRequest("message.sendAsSender", { ...base(), asSender: "cli" }));
+		expect(resp.ok).toBe(true);
+		const [, , target, source, opts] = vi.mocked(sendMessageImmediately).mock.calls[0]!;
+		expect(opts).toMatchObject({ externalSender: { id: "cli", label: "CLI" }, author: null });
+		// No task source and no bound agent: it goes to the main agent, and the only
+		// reply the envelope can offer is --to-sender.
+		expect(target).toBeNull();
+		expect(source).toBeNull();
+	});
+
+	it("refuses --as-sender with --agent: a sender's message goes to the main agent", async () => {
+		const handle = encodeAgentHandle({ paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" });
+		const resp = await handleRequest(makeRequest("message.sendAsSender", { ...base(), asSender: "cli", agentHandle: handle }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("--agent") });
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses asSender on plain message.send, so an app never drops it silently", async () => {
+		const resp = await handleRequest(makeRequest("message.send", { ...base(), asSender: "cli" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("message.sendAsSender") });
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses a sender request that also carries a task's identity", async () => {
+		const resp = await handleRequest(makeRequest("message.sendAsSender", { ...base(), asSender: "cli", sourceTaskId: makeTask().id }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("inside a task worktree") });
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses asSender on plain agent.resume before resolving anything", async () => {
+		const resp = await handleRequest(makeRequest("agent.resume", { taskId: makeTask().id, asSender: "cli" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("agent.resumeAsSender") });
+	});
+
+	it("never queues a sender's message into tasks.json", async () => {
+		const at = new Date(Date.now() + 60_000).toISOString();
+		const resp = await handleRequest(makeRequest("message.schedule", { ...base(), at, asSender: "cli" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("--in or --at") });
+		expect(scheduleMessage).not.toHaveBeenCalled();
+	});
+});
+
 describe("message.scheduled.list / cancel — the CLI queue verbs", () => {
 	const queued = (id: string, at: string, extra: Record<string, unknown> = {}) =>
 		({ id, text: "wake   up\nplease", at, target: { kind: "agent" as const }, ...extra });
@@ -5406,7 +5467,7 @@ describe("message.send — the sender's role travels to the envelope", () => {
 
 	it("addresses --agent to that one agent and reports the pane and role it went to", async () => {
 		const addressed = { paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" };
-		vi.mocked(sendMessageImmediately).mockResolvedValueOnce({ status: "held", paneId: "%3", agentRole: "review", spilledPath: null });
+		vi.mocked(sendMessageImmediately).mockResolvedValueOnce({ status: "held", paneId: "%3", agentRole: "review", spilledPath: null, messageId: "m-1" });
 		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { agentHandle: encodeAgentHandle(addressed) });
 		expect(resp.ok).toBe(true);
 		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[4]).toMatchObject({ author: addressed });
