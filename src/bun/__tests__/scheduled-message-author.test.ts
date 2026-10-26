@@ -16,7 +16,14 @@ import { collectProcessInfo } from "../port-scanner";
 import { spawn } from "../spawn";
 import { nativeTaskPanesState } from "../native-task-panes";
 import { tmux } from "../tmux";
-import { captureScheduledMessageAuthor, liveAgentPaneIds, resolveScheduledMessageAuthorPane, taskMainAgentLiveness } from "../scheduled-message-author";
+import {
+	captureScheduledMessageAuthor,
+	captureSenderAgent,
+	liveAgentPaneIds,
+	readPaneAgentIdentity,
+	resolveScheduledMessageAuthorPane,
+	taskMainAgentLiveness,
+} from "../scheduled-message-author";
 import type { PaneSessionEntry, Task } from "../../shared/types";
 
 /** A synthetic machine: processes plus the tmux panes (root pid each) on one server generation. */
@@ -368,5 +375,107 @@ describe("taskMainAgentLiveness — what the keep-alive watchdog may conclude", 
 		} finally {
 			Object.defineProperty(process, "platform", platform);
 		}
+	});
+});
+
+/** Run `body` as if on Windows, where `pid@start` cannot be read. */
+async function onWindows(body: () => Promise<void>): Promise<void> {
+	const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		await body();
+	} finally {
+		Object.defineProperty(process, "platform", platform);
+	}
+}
+
+describe("captureSenderAgent — the sender a reply must reach, or why there is none", () => {
+	it("names the sending agent's process", async () => {
+		expect(await captureSenderAgent(task(), "%2", 203)).toEqual({
+			ok: true,
+			author: { paneId: "%2", sessionId: "conv-b", paneToken: "gen-1", agentProcess: sig(201) },
+		});
+	});
+
+	it("says no agent sent it when a human typed it in a shell split", async () => {
+		for (const cliPid of [403, 411, 421]) {
+			expect(await captureSenderAgent(task(), "%4", cliPid)).toMatchObject({ ok: false, reason: "no-agent" });
+		}
+	});
+
+	it("says no agent sent it when dev3 ran outside a task pane", async () => {
+		expect(await captureSenderAgent(task(), null, 103)).toMatchObject({
+			ok: false,
+			reason: "no-agent",
+			detail: expect.stringContaining("not run from a task terminal pane"),
+		});
+	});
+
+	it("says it cannot tell when the pane is not there", async () => {
+		delete panes["%1"];
+		expect(await captureSenderAgent(task(), "%1", 103)).toMatchObject({ ok: false, reason: "unknown" });
+	});
+
+	it("is unsupported on Windows, and says so instead of guessing", async () => {
+		await onWindows(async () => {
+			expect(await captureSenderAgent(task(), "%1", 103)).toEqual({
+				ok: false,
+				reason: "unsupported",
+				detail: "agent identity cannot be verified on Windows yet",
+			});
+		});
+		expect(collectProcessInfo).not.toHaveBeenCalled();
+	});
+});
+
+describe("readPaneAgentIdentity — the agent a pane runs now", () => {
+	it("names the agent in each agent pane, the unregistered reviewer included", async () => {
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: true, author: { paneId: "%1", agentProcess: sig(101) } });
+		expect(await readPaneAgentIdentity(task(), "%3")).toMatchObject({ ok: true, author: { paneId: "%3", sessionId: null, agentProcess: sig(301) } });
+	});
+
+	it("proves the agent exited once its pane is the bare shell the script hands over to", async () => {
+		agentExits(100);
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "no-agent", detail: expect.stringContaining("has exited") });
+	});
+
+	it("names the NEW agent after a replacement in the same pane, and the old handle is refused", async () => {
+		const before = await readPaneAgentIdentity(task(), "%2");
+		if (!before.ok) throw new Error("expected agent B to be identified");
+		agentExits(200);
+		procs.find((p) => p.pid === 200)!.args = "/opt/homebrew/bin/zsh /tmp/dev3-task-cmd.sh";
+		procs.push({ pid: 250, ppid: 200, args: "/Users/me/.local/bin/claude", start: "Mon Oct  5 10:00:00 2026" });
+
+		expect(await readPaneAgentIdentity(task(), "%2")).toMatchObject({ ok: true, author: { paneId: "%2", agentProcess: sig(250) } });
+		expect(await resolveScheduledMessageAuthorPane(task(), before.author)).toMatchObject({
+			ok: false,
+			detail: expect.stringContaining("the addressed agent (pane %2"),
+		});
+	});
+
+	it("is unknown, never no-agent, while a setup script runs or when `ps` fails", async () => {
+		procs = procs.filter((p) => p.ppid !== 100);
+		procs.find((p) => p.pid === 100)!.args = "/opt/homebrew/bin/zsh /tmp/dev3-task-startup.sh";
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "unknown" });
+		vi.mocked(collectProcessInfo).mockResolvedValue({ tree: new Map(), cmdlines: new Map(), resources: new Map() });
+		expect(await readPaneAgentIdentity(task(), "%2")).toMatchObject({ ok: false, reason: "unknown" });
+	});
+
+	it("is unsupported on Windows", async () => {
+		await onWindows(async () => {
+			expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "unsupported" });
+		});
+	});
+});
+
+describe("resolveScheduledMessageAuthorPane on Windows", () => {
+	it("refuses an agent-bound message outright rather than delivering to a pane it cannot verify", async () => {
+		const author = { paneId: "%1", sessionId: "conv-a", paneToken: "gen-1", agentProcess: sig(101) };
+		await onWindows(async () => {
+			expect(await resolveScheduledMessageAuthorPane(task(), author)).toEqual({
+				ok: false,
+				detail: "agent identity cannot be verified on Windows yet; not sent to another pane",
+			});
+		});
 	});
 });

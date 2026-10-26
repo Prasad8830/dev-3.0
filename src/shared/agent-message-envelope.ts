@@ -1,6 +1,7 @@
 import type { PrStatusNotice, PrWatchUntil } from "./pr-watch";
 import { parseGitHubPullRequestUrl } from "./pr-status";
 import { ID_PREFIX_MIN_LENGTH, type AgentMessageSource } from "./types";
+import { encodeAgentHandle } from "./agent-handle";
 
 /**
  * What stands in for the subject in a printed reply command. Obviously a slot to
@@ -23,9 +24,19 @@ export const REPLY_SUBJECT_PLACEHOLDER = "what your reply is about";
 export const AGENT_MESSAGE_BURST_SEPARATOR = "\n\n";
 
 /**
+ * What `<reply-unavailable>` says when the record predates sender identities, or
+ * whoever stamped it did not say why none was proven.
+ */
+export const REPLY_UNAVAILABLE_UNRECORDED = "the sending agent's identity was not recorded";
+
+/**
  * Wrap a cross-task agent message in a pseudo-XML envelope so the receiving
  * agent immediately sees the text came from another task's agent (not from the
  * human) and knows the exact command to answer with.
+ *
+ * The reply command addresses the sending AGENT (`--agent`), never just its task:
+ * a task-level reply may reach a sibling of the asker. With no proven sender there
+ * is no reply command at all, only `<reply-unavailable>` saying why (#1809).
  *
  * `receiverProjectId` is the project of the task being written TO — it decides
  * whether the reply command needs `--project` (see {@link agentReplyCommand}).
@@ -57,17 +68,20 @@ export function wrapAgentMessage(
 	// were required.
 	if (subject) lines.push(`<subject>${escapeXmlText(subject)}</subject>`);
 	lines.push(
-		`<reply-with>${agentReplyCommand({
-			target: {
-				id: source.taskId,
-				seq: source.seq,
-				seqShared,
-				variantIndex: source.variantIndex,
-				projectId: source.projectId,
-			},
-			fromProjectId: receiverProjectId,
-			quoted: "your reply",
-		})}</reply-with>`,
+		source.agent
+			? `<reply-with>${agentReplyCommand({
+				target: {
+					id: source.taskId,
+					seq: source.seq,
+					seqShared,
+					variantIndex: source.variantIndex,
+					projectId: source.projectId,
+				},
+				fromProjectId: receiverProjectId,
+				quoted: "your reply",
+				agentHandle: encodeAgentHandle(source.agent),
+			})}</reply-with>`
+			: `<reply-unavailable>${escapeXmlText(source.agentUnavailable || REPLY_UNAVAILABLE_UNRECORDED)}</reply-unavailable>`,
 		"<message>",
 		text,
 		"</message>",
@@ -198,6 +212,8 @@ export function agentReplyCommand(opts: {
 	quoted: string;
 	/** Placeholder for the mandatory `--subject`; overridden only by tests. */
 	subject?: string;
+	/** Narrows the reply to one agent of the target task (`dev3 message --agent`). */
+	agentHandle?: string;
 }): string {
 	const { target, fromProjectId, quoted } = opts;
 	const crossProject = target.projectId != null && target.projectId !== fromProjectId;
@@ -209,7 +225,8 @@ export function agentReplyCommand(opts: {
 	// `--subject` is mandatory, so the printed command must carry it: a caller who
 	// copy-pastes the old shape is rejected with exit 17 instead of being heard.
 	const subject = opts.subject ?? REPLY_SUBJECT_PLACEHOLDER;
-	return `dev3 message --task ${address}${scope} --subject "${subject}" "${quoted}"`;
+	const agent = opts.agentHandle ? ` --agent ${opts.agentHandle}` : "";
+	return `dev3 message --task ${address}${scope}${agent} --subject "${subject}" "${quoted}"`;
 }
 
 /**

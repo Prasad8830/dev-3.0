@@ -3,6 +3,7 @@ import { seqIsShared } from "../../shared/agent-message-envelope";
 import { ID_PREFIX_MIN_LENGTH, getTaskTitle, isCoordinatorTask } from "../../shared/types";
 import * as data from "../data";
 import { loadEffectiveTaskHistory } from "../task-blobs";
+import { captureSenderAgent } from "../scheduled-message-author";
 
 const MIN_PREFIX_LENGTH = ID_PREFIX_MIN_LENGTH;
 
@@ -337,6 +338,27 @@ export async function resolveAgentMessageSource(
 		projectId: found.task.projectId,
 		...(isCoordinatorTask(found.task) ? { role: "coordinator" as const } : {}),
 	};
+}
+
+/**
+ * Stamp the sending AGENT onto a source, from the pane and pid the CLI reported, so
+ * a reply can reach that agent and no sibling. When none can be proven the source
+ * says why instead, and the envelope then offers no reply command at all.
+ */
+export async function withSenderAgent(source: AgentMessageSource, params: Record<string, unknown>): Promise<AgentMessageSource> {
+	let sender: Task | null = null;
+	try {
+		sender = (await resolveTaskAcrossProjects(source.taskId))?.task ?? null;
+	} catch {
+		sender = null;
+	}
+	if (!sender) return { ...source, agentUnavailable: "the sending task could not be read" };
+	const identity = await captureSenderAgent(
+		sender,
+		typeof params.sourcePaneId === "string" ? params.sourcePaneId : null,
+		typeof params.sourcePid === "number" ? params.sourcePid : null,
+	);
+	return identity.ok ? { ...source, agent: identity.author } : { ...source, agentUnavailable: identity.detail };
 }
 
 /** {@link seqIsShared} against a project's live task list; pessimistic if it cannot be read. */

@@ -1,7 +1,9 @@
 /**
- * Bind a self-reminder to the agent PROCESS that scheduled it, so a multi-agent
- * task does not fire it into the focused sibling or into the shell an exited agent
- * left behind. Why: decisions/2026/10/06/scheduled-self-reminder-author-binding.md.
+ * Bind a message to one agent PROCESS (a self-reminder's author, an `--agent`
+ * address, a sender awaiting a reply), so a multi-agent task never delivers it to
+ * the focused sibling or to the shell an exited agent left behind. Why:
+ * decisions/2026/10/06/scheduled-self-reminder-author-binding.md and
+ * decisions/2026/10/26/agent-addressed-messages-and-replies.md.
  */
 
 import type { ScheduledMessageAuthor, Task } from "../shared/types";
@@ -14,6 +16,17 @@ import { nativeTaskPanesState } from "./native-task-panes";
 import { DEFAULT_TMUX_SOCKET, PANE_ID_PID_FORMAT, taskSessionName, tmux } from "./tmux";
 
 export type AuthorPaneResolution = { ok: true; paneId: string } | { ok: false; detail: string };
+
+/**
+ * An agent identity, or why none can be proven. `unsupported` and `no-agent` are
+ * answers; `unknown` means a probe failed and says nothing about the agent.
+ */
+export type AgentIdentity =
+	| { ok: true; author: ScheduledMessageAuthor }
+	| { ok: false; reason: "unsupported" | "no-agent" | "unknown"; detail: string };
+
+/** Why nothing is captured on Windows: the identity is `pid@start`, and only `ps` reads that today. */
+export const AGENT_IDENTITY_UNSUPPORTED_DETAIL = "agent identity cannot be verified on Windows yet";
 
 const SHELLS = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh", "powershell"]);
 const MAX_ANCESTRY = 64;
@@ -86,22 +99,62 @@ async function paneRoot(task: Task, paneId: string): Promise<PaneRoot | null> {
 	return rootPid > 0 ? { rootPid, paneToken: pin.incarnation.serverToken } : null;
 }
 
+function unproven(reason: "unsupported" | "no-agent" | "unknown", detail: string): AgentIdentity {
+	return { ok: false, reason, detail };
+}
+
+async function identityOf(task: Task, paneId: string, root: PaneRoot, agentPid: number): Promise<AgentIdentity> {
+	const agentProcess = await readProcessStartSignature(agentPid);
+	if (!agentProcess) return unproven("unknown", "the agent process ended while it was being identified");
+	const sessionId = task.sessionState?.panes.find((p) => p.paneId === paneId)?.sessionId ?? null;
+	return { ok: true, author: { paneId, sessionId, paneToken: root.paneToken, agentProcess } };
+}
+
+/** The agent that ran a `dev3` command from `paneId` (the CLI's own pid), or why none can be proven. */
+export async function captureSenderAgent(
+	task: Task,
+	paneId: string | null | undefined,
+	cliPid: number | null | undefined,
+): Promise<AgentIdentity> {
+	if (process.platform === "win32") return unproven("unsupported", AGENT_IDENTITY_UNSUPPORTED_DETAIL);
+	const pane = paneId?.trim();
+	if (!pane || !cliPid || !Number.isInteger(cliPid)) {
+		return unproven("no-agent", "dev3 was not run from a task terminal pane, so there is no sending agent");
+	}
+	const root = await paneRoot(task, pane);
+	if (!root) return unproven("unknown", `the sender's pane ${pane} could not be found`);
+	const agentPid = agentAncestor(await processTable(), cliPid, root.rootPid);
+	if (!agentPid) {
+		return unproven("no-agent", "no agent process runs dev3 here (a shell in the pane, or an agent started through a wrapper script)");
+	}
+	return identityOf(task, pane, root, agentPid);
+}
+
 /** Record the agent that ran `dev3 message` from `paneId`, or null when no agent can be proven. */
 export async function captureScheduledMessageAuthor(
 	task: Task,
 	paneId: string | null | undefined,
 	cliPid: number | null | undefined,
 ): Promise<ScheduledMessageAuthor | null> {
-	const pane = paneId?.trim();
-	if (!pane || !cliPid || !Number.isInteger(cliPid) || process.platform === "win32") return null;
-	const root = await paneRoot(task, pane);
-	if (!root) return null;
-	const agentPid = agentAncestor(await processTable(), cliPid, root.rootPid);
-	if (!agentPid) return null;
-	const agentProcess = await readProcessStartSignature(agentPid);
-	if (!agentProcess) return null;
-	const sessionId = task.sessionState?.panes.find((p) => p.paneId === pane)?.sessionId ?? null;
-	return { paneId: pane, sessionId, paneToken: root.paneToken, agentProcess };
+	const captured = await captureSenderAgent(task, paneId, cliPid);
+	return captured.ok ? captured.author : null;
+}
+
+/**
+ * The agent running in `paneId` right now: the non-shell child of its launch
+ * script. `no-agent` only on proof, the root having become the bare shell the
+ * script hands over to; a setup script still running or a failed `ps` is `unknown`.
+ */
+export async function readPaneAgentIdentity(task: Task, paneId: string): Promise<AgentIdentity> {
+	if (process.platform === "win32") return unproven("unsupported", AGENT_IDENTITY_UNSUPPORTED_DETAIL);
+	const root = await paneRoot(task, paneId);
+	if (!root) return unproven("unknown", `pane ${paneId} could not be read`);
+	const table = await processTable();
+	if (!table.cmdlines.has(root.rootPid)) return unproven("unknown", "the process table could not be read");
+	if (isHandedOverShell(table, root.rootPid)) return unproven("no-agent", `the agent in pane ${paneId} has exited`);
+	const agentPid = (table.childrenOf.get(root.rootPid) ?? []).find((pid) => !isShell(table, pid));
+	if (!agentPid) return unproven("unknown", `no agent process is running in pane ${paneId} yet`);
+	return identityOf(task, paneId, root, agentPid);
 }
 
 function signaturePid(signature: string): number {
@@ -190,7 +243,8 @@ export async function taskMainAgentLiveness(task: Task): Promise<MainAgentLivene
  * is left is a shell.
  */
 export async function resolveScheduledMessageAuthorPane(task: Task, author: ScheduledMessageAuthor): Promise<AuthorPaneResolution> {
-	const who = `the agent that scheduled it (pane ${author.paneId}${author.sessionId ? `, session ${author.sessionId.slice(0, 8)}` : ""})`;
+	if (process.platform === "win32") return { ok: false, detail: `${AGENT_IDENTITY_UNSUPPORTED_DETAIL}; not sent to another pane` };
+	const who = `the addressed agent (pane ${author.paneId}${author.sessionId ? `, session ${author.sessionId.slice(0, 8)}` : ""})`;
 	const gone: AuthorPaneResolution = { ok: false, detail: `${who} is no longer running in this task; not sent to another pane` };
 
 	const pid = signaturePid(author.agentProcess);

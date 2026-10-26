@@ -13,15 +13,19 @@ import {
 import { utf8Length } from "../../shared/pane-input";
 import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES } from "../../shared/types";
 import type { PrStatusNotice } from "../../shared/pr-watch";
+import { encodeAgentHandle } from "../../shared/agent-handle";
 
 const PROJECT_A = "aaaaaaaa-1111-2222-3333-444455556666";
 const PROJECT_B = "bbbbbbbb-1111-2222-3333-444455556666";
+/** The sending agent, proven: what every reply command now addresses. */
+const AGENT = { paneId: "%5", sessionId: "conv-s", paneToken: "gen-1", agentProcess: "505@Mon Oct 26 09:00:00 2026" };
+const HANDLE = encodeAgentHandle(AGENT);
 
 describe("wrapAgentMessage", () => {
 	it("wraps the text with the sender seq and a reply command", () => {
 		const out = wrapAgentMessage(
 			"do the thing",
-			{ taskId: "t-1", seq: 1310, title: "Fix the parser", projectId: PROJECT_A },
+			{ taskId: "t-1", seq: 1310, title: "Fix the parser", projectId: PROJECT_A, agent: AGENT },
 			PROJECT_A,
 		);
 		expect(out).toBe(
@@ -29,7 +33,7 @@ describe("wrapAgentMessage", () => {
 				"<dev3-ai-message>",
 				"<from-task>seq:1310</from-task>",
 				"<from-title>Fix the parser</from-title>",
-				'<reply-with>dev3 message --task seq:1310 --subject "what your reply is about" "your reply"</reply-with>',
+				`<reply-with>dev3 message --task seq:1310 --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`,
 				"<message>",
 				"do the thing",
 				"</message>",
@@ -103,27 +107,27 @@ describe("wrapAgentMessage", () => {
 	it("addresses a live variant group member by seq + --variant", () => {
 		const out = wrapAgentMessage(
 			"hi",
-			{ taskId: "7a9e61f4-1111-2222-3333-444455556666", seq: 1575, variantIndex: 1, seqShared: true },
+			{ taskId: "7a9e61f4-1111-2222-3333-444455556666", seq: 1575, variantIndex: 1, seqShared: true, agent: AGENT },
 			PROJECT_A,
 		);
 		// `<from-task>` is an address, not a command, so it cannot carry a flag.
 		expect(out).toContain("<from-task>7a9e61f4-1111-2222-3333-444455556666</from-task>");
-		expect(out).toContain('<reply-with>dev3 message --task seq:1575 --variant 1 --subject "what your reply is about" "your reply"</reply-with>');
+		expect(out).toContain(`<reply-with>dev3 message --task seq:1575 --variant 1 --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`);
 	});
 
 	it("still falls back to the id when a shared seq has no variant index to name", () => {
 		const out = wrapAgentMessage(
 			"hi",
-			{ taskId: "7a9e61f4-1111-2222-3333-444455556666", seq: 1575, variantIndex: null, seqShared: true },
+			{ taskId: "7a9e61f4-1111-2222-3333-444455556666", seq: 1575, variantIndex: null, seqShared: true, agent: AGENT },
 			PROJECT_A,
 		);
-		expect(out).toContain('<reply-with>dev3 message --task 7a9e61f4-1111-2222-3333-444455556666 --subject "what your reply is about" "your reply"</reply-with>');
+		expect(out).toContain(`<reply-with>dev3 message --task 7a9e61f4-1111-2222-3333-444455556666 --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`);
 		expect(out).not.toContain("seq:1575");
 	});
 
 	it("keeps the seq address when the sender has no variant", () => {
-		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1575, variantIndex: null }, PROJECT_A);
-		expect(out).toContain('<reply-with>dev3 message --task seq:1575 --subject "what your reply is about" "your reply"</reply-with>');
+		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1575, variantIndex: null, agent: AGENT }, PROJECT_A);
+		expect(out).toContain(`<reply-with>dev3 message --task seq:1575 --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`);
 	});
 
 	it("keeps the seq address for a lone variant survivor", () => {
@@ -131,24 +135,42 @@ describe("wrapAgentMessage", () => {
 		// forever and was handed out as a raw UUID for no reason.
 		const out = wrapAgentMessage(
 			"hi",
-			{ taskId: "824c6557-59be-47ca-ac0e-f7db974cfe08", seq: 490, variantIndex: 1, seqShared: false },
+			{ taskId: "824c6557-59be-47ca-ac0e-f7db974cfe08", seq: 490, variantIndex: 1, seqShared: false, agent: AGENT },
 			PROJECT_A,
 		);
 		expect(out).toContain("<from-task>seq:490</from-task>");
-		expect(out).toContain('<reply-with>dev3 message --task seq:490 --subject "what your reply is about" "your reply"</reply-with>');
+		expect(out).toContain(`<reply-with>dev3 message --task seq:490 --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`);
 		expect(out).not.toContain("824c6557");
 	});
 
 	it("addresses a record queued before seqShared existed by seq + --variant", () => {
 		// The pessimistic legacy path assumes the seq is shared; --variant makes that
 		// assumption cheap instead of spending a UUID on it.
-		const out = wrapAgentMessage("hi", { taskId: "t-9", seq: 1575, variantIndex: 1 }, PROJECT_A);
-		expect(out).toContain('<reply-with>dev3 message --task seq:1575 --variant 1 --subject "what your reply is about" "your reply"</reply-with>');
+		const out = wrapAgentMessage("hi", { taskId: "t-9", seq: 1575, variantIndex: 1, agent: AGENT }, PROJECT_A);
+		expect(out).toContain(`<reply-with>dev3 message --task seq:1575 --variant 1 --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`);
 	});
 
 	it("scopes the reply command when the sender sits on another board", () => {
-		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1623, projectId: PROJECT_B }, PROJECT_A);
-		expect(out).toContain('<reply-with>dev3 message --task seq:1623 --project bbbbbbbb --subject "what your reply is about" "your reply"</reply-with>');
+		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1623, projectId: PROJECT_B, agent: AGENT }, PROJECT_A);
+		expect(out).toContain(`<reply-with>dev3 message --task seq:1623 --project bbbbbbbb --agent ${HANDLE} --subject "what your reply is about" "your reply"</reply-with>`);
+	});
+
+	it("offers NO reply command when the sending agent was not proven, and says why", () => {
+		const out = wrapAgentMessage(
+			"hi",
+			{ taskId: "t-1", seq: 1623, projectId: PROJECT_A, agentUnavailable: "a shell in the pane <not an agent>" },
+			PROJECT_A,
+		);
+		expect(out).not.toContain("<reply-with>");
+		expect(out).not.toContain("dev3 message");
+		expect(out).toContain("<reply-unavailable>a shell in the pane &lt;not an agent&gt;</reply-unavailable>");
+		expect(out.indexOf("<reply-unavailable>")).toBeLessThan(out.indexOf("<message>"));
+	});
+
+	it("treats a record queued before sender identities as unproven, never as task-addressed", () => {
+		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1623 }, PROJECT_A);
+		expect(out).not.toContain("<reply-with>");
+		expect(out).toContain("<reply-unavailable>the sending agent's identity was not recorded</reply-unavailable>");
 	});
 });
 

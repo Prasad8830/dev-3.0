@@ -6,6 +6,7 @@ import { CLI_EXIT_CODE_APPROVAL_OUTCOME_UNKNOWN, CLI_EXIT_CODE_APPROVAL_STILL_PE
 import { CODEX_STOP_HOOK_FLAG, CODEX_STOP_HOOK_SUCCESS_JSON, TOLERATE_APP_OFFLINE_FLAG } from "../../shared/agent-hooks";
 import { allPullRequests } from "../../shared/task-pull-requests";
 import { sendRequest } from "../socket-client";
+import { senderAgentParams } from "../sender-agent";
 import { DESTRUCTIVE_APPROVAL_TARGET, isAgentApprovalNotAttached, type AgentApprovalStatus, type DestructiveApprovalKind } from "../../shared/agent-approval";
 import { printDetail, exitError, exitUsage } from "../output";
 import type { ParsedArgs } from "../args";
@@ -797,6 +798,7 @@ async function createScratchAndRun(
 		resp = await sendRequest(socketPath, "task.createScratchAndRun", {
 			projectId,
 			sourceTaskId: context.taskId,
+			...senderAgentParams(context),
 			...(handoffNote ? { handoffNote } : {}),
 			...suggestion,
 		}, { timeoutMs: await launchApprovalTimeoutMs(socketPath) });
@@ -940,6 +942,9 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	// to know which one: moving somebody else's task into a running column is a
 	// launch, and a launch needs the user's approval and agent pick.
 	if (context?.taskId) params.sourceTaskId = context.taskId;
+	// The launched task's first envelope replies to the agent asking, so it needs
+	// to know which one that is.
+	Object.assign(params, senderAgentParams(context));
 	// Only used when this move turns out to be a launch; a same-task status move
 	// carries it and the server ignores it.
 	const handoffNote = readHandoffFile(args);

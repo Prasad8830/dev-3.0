@@ -199,8 +199,18 @@ vi.mock("../scheduled-message-scheduler", () => ({
 }));
 
 vi.mock("../scheduled-message-author", () => ({
+	AGENT_IDENTITY_UNSUPPORTED_DETAIL: "agent identity cannot be verified on Windows yet",
 	captureScheduledMessageAuthor: vi.fn(async (_task: unknown, paneId: string | null) =>
 		paneId ? { paneId, sessionId: "conv-a", paneToken: "gen-1", agentProcess: "101@x" } : null),
+	captureSenderAgent: vi.fn(async (_task: unknown, paneId: string | null) =>
+		paneId
+			? { ok: true, author: { paneId, sessionId: "conv-s", paneToken: "gen-9", agentProcess: "909@x" } }
+			: { ok: false, reason: "no-agent", detail: "dev3 was not run from a task terminal pane, so there is no sending agent" }),
+	resolveScheduledMessageAuthorPane: vi.fn(async (_task: unknown, author: { paneId: string }) => ({ ok: true, paneId: author.paneId })),
+}));
+
+vi.mock("../agent-message-target", () => ({
+	withAgentPanes: vi.fn(async (_task: unknown, listing: unknown) => listing),
 }));
 
 vi.mock("../vents", () => ({
@@ -254,7 +264,9 @@ import { saveSharedImage, saveSharedVideos } from "../shared-images";
 import { saveSharedArtifact } from "../shared-artifacts";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task-pane-runs";
 import { cancelScheduledMessageByRef, scheduleMessage, sendMessageImmediately } from "../scheduled-message-scheduler";
-import { captureScheduledMessageAuthor } from "../scheduled-message-author";
+import { captureScheduledMessageAuthor, resolveScheduledMessageAuthorPane } from "../scheduled-message-author";
+import { withAgentPanes } from "../agent-message-target";
+import { encodeAgentHandle } from "../../shared/agent-handle";
 
 // `task.open` imports the window layer lazily; mocking it keeps electrobun out.
 vi.mock("../window-manager", () => ({
@@ -481,6 +493,35 @@ describe("message.scheduled.list / cancel — the CLI queue verbs", () => {
 		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ author: null });
 	});
 
+	const ADDRESSED = { paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" };
+
+	it("binds a message scheduled with --agent to that agent, checked while the sender listens", async () => {
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const resp = await handleRequest(makeRequest("message.schedule", {
+			taskId: task.id, projectId: "proj-1", text: "later", subject: "s", at: new Date(Date.now() + 60_000).toISOString(),
+			agentHandle: encodeAgentHandle(ADDRESSED),
+		}));
+		expect(resp.ok).toBe(true);
+		expect(resolveScheduledMessageAuthorPane).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }), ADDRESSED);
+		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ author: ADDRESSED });
+	});
+
+	it("refuses to schedule for an addressed agent that is already gone, queueing nothing", async () => {
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(resolveScheduledMessageAuthorPane).mockResolvedValueOnce({ ok: false, detail: "the addressed agent (pane %3) is no longer running in this task; not sent to another pane" });
+		const resp = await handleRequest(makeRequest("message.schedule", {
+			taskId: task.id, projectId: "proj-1", text: "later", subject: "s", at: new Date(Date.now() + 60_000).toISOString(),
+			agentHandle: encodeAgentHandle(ADDRESSED),
+		}));
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("the addressed agent (pane %3) is no longer running");
+		expect(scheduleMessage).not.toHaveBeenCalled();
+	});
+
 	it("lists the queue earliest first, with sender seq and a flattened preview", async () => {
 		const task = makeTask({ scheduledMessages: [
 			queued("late", "2099-01-02T00:00:00.000Z", { subject: "second" }),
@@ -642,6 +683,8 @@ describe("pane.* — the CLI's own pane surface", () => {
 
 		expect((await handleRequest(makeRequest("pane.list", { taskId: makeTask().id, selfPaneId: "pane-1" }))).ok).toBe(true);
 		expect(vi.mocked(paneRunListing).mock.calls[0][1]).toBe("pane-1");
+		// Every listing is annotated with the agent panes and their handles.
+		expect(withAgentPanes).toHaveBeenCalledWith(expect.objectContaining({ id: makeTask().id }), await vi.mocked(paneRunListing).mock.results[0]?.value);
 
 		expect((await handleRequest(makeRequest("pane.close", { taskId: makeTask().id, runId: "run-0123456789ab" }))).ok).toBe(true);
 		expect(vi.mocked(closePaneRun).mock.calls[0][1]).toBe("run-0123456789ab");
@@ -5297,7 +5340,7 @@ describe("message.send — the sender's role travels to the envelope", () => {
 	const SENDER = "cccccccc-1111-2222-3333-444444444444";
 	const TARGET = "dddddddd-1111-2222-3333-444444444444";
 
-	function sendFrom(sender: Task) {
+	function sendFrom(sender: Task, extra: Record<string, unknown> = {}) {
 		const tasks = [sender, makeTask({ id: TARGET, seq: 2 })];
 		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
 		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
@@ -5305,7 +5348,7 @@ describe("message.send — the sender's role travels to the envelope", () => {
 		vi.mocked(data.loadTasks).mockResolvedValue(tasks);
 		vi.mocked(data.getTask).mockImplementation(async (_p, id) => tasks.find((t) => t.id === id)!);
 		return handleRequest(
-			makeRequest("message.send", { subject: "merge it", taskId: TARGET, projectId: "proj-1", sourceTaskId: SENDER, text: "merge" }),
+			makeRequest("message.send", { subject: "merge it", taskId: TARGET, projectId: "proj-1", sourceTaskId: SENDER, text: "merge", ...extra }),
 		);
 	}
 
@@ -5320,5 +5363,40 @@ describe("message.send — the sender's role travels to the envelope", () => {
 		const source = vi.mocked(sendMessageImmediately).mock.calls[0]?.[3];
 		expect(source).toMatchObject({ taskId: SENDER });
 		expect(source).not.toHaveProperty("role");
+	});
+
+	it("stamps the sending agent from the pane and pid the CLI reported, so a reply reaches it", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { sourcePaneId: "%5", sourcePid: 777 });
+		expect(resp.ok).toBe(true);
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[3]).toMatchObject({
+			taskId: SENDER,
+			agent: { paneId: "%5", agentProcess: "909@x" },
+		});
+		expect(resp.data).not.toHaveProperty("replyUnavailable");
+	});
+
+	it("tells the sender when no agent could be proven, and the source says why", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }));
+		expect(resp.ok).toBe(true);
+		const source = vi.mocked(sendMessageImmediately).mock.calls[0]?.[3];
+		expect(source).not.toHaveProperty("agent");
+		expect(source).toMatchObject({ agentUnavailable: expect.stringContaining("not run from a task terminal pane") });
+		expect(resp.data).toMatchObject({ replyUnavailable: expect.stringContaining("not run from a task terminal pane") });
+	});
+
+	it("addresses --agent to that one agent and reports the pane and role it went to", async () => {
+		const addressed = { paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" };
+		vi.mocked(sendMessageImmediately).mockResolvedValueOnce({ status: "held", paneId: "%3", agentRole: "review", spilledPath: null });
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { agentHandle: encodeAgentHandle(addressed) });
+		expect(resp.ok).toBe(true);
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[4]).toMatchObject({ author: addressed });
+		expect(resp.data).toMatchObject({ status: "held", paneId: "%3", agentRole: "review" });
+	});
+
+	it("refuses a malformed --agent handle before anything is sent", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { agentHandle: "%3" });
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("not an agent handle");
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
 	});
 });

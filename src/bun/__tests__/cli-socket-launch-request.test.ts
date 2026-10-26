@@ -47,6 +47,15 @@ vi.mock("../rpc-handlers", () => {
 	};
 });
 
+vi.mock("../scheduled-message-author", () => ({
+	AGENT_IDENTITY_UNSUPPORTED_DETAIL: "agent identity cannot be verified on Windows yet",
+	captureScheduledMessageAuthor: vi.fn(async () => null),
+	resolveScheduledMessageAuthorPane: vi.fn(),
+	captureSenderAgent: vi.fn(async (_task: unknown, paneId: string | null) =>
+		paneId
+			? { ok: true, author: { paneId, sessionId: "conv-r", paneToken: "gen-1", agentProcess: "77@x" } }
+			: { ok: false, reason: "no-agent", detail: "dev3 was not run from a task terminal pane, so there is no sending agent" }),
+}));
 vi.mock("../agent-launch-handoff", () => ({
 	deliverLaunchHandoff: vi.fn(() => Promise.resolve(true)),
 }));
@@ -99,6 +108,7 @@ vi.mock("node:fs", () => ({
 import * as data from "../data";
 import { moveTask, launchTaskWithAgentChoice, createScratchTask, deleteTask, getPushMessage } from "../rpc-handlers";
 import { deliverLaunchHandoff } from "../agent-launch-handoff";
+import { captureSenderAgent } from "../scheduled-message-author";
 import { resolveAgentRequest, _resetAgentRequestsForTests } from "../agent-requests";
 import { loadSettings } from "../settings";
 import { validateLaunchSuggestion } from "../cli-agent-spawn";
@@ -268,6 +278,44 @@ describe("task.move — agent-initiated launch approval", () => {
 			// No --handoff-file: the child still gets dev3's own default note.
 			launcherNote: null,
 		}));
+	});
+
+	it("hands the child a reply command that reaches the asking AGENT, not just its task", async () => {
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" as const }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+			sourcePaneId: "%2",
+			sourcePid: 4242,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: "builtin-claude", configId: "claude-auto", accountId: null }] },
+		});
+		expect((await respPromise).ok).toBe(true);
+
+		expect(captureSenderAgent).toHaveBeenCalledWith(expect.objectContaining({ id: REQUESTER_ID }), "%2", 4242);
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
+			source: expect.objectContaining({ seq: 3, agent: expect.objectContaining({ paneId: "%2", agentProcess: "77@x" }) }),
+		}));
+	});
+
+	it("never captures a sender for a plain move that launches nothing", async () => {
+		setupBoard(makeTask({ status: "in-progress" }));
+		vi.mocked(moveTask).mockResolvedValue(makeTask({ status: "review-by-user" }));
+		await handleRequest(moveRequest({
+			taskId: TARGET_ID, newStatus: "review-by-user", projectId: "proj-1", sourceTaskId: REQUESTER_ID, sourcePaneId: "%2", sourcePid: 4242,
+		}));
+		expect(captureSenderAgent).not.toHaveBeenCalled();
 	});
 
 	it("passes the launcher's --handoff-file text through to the child's note", async () => {
@@ -582,6 +630,10 @@ describe("task.createScratchAndRun", () => {
 		expect(resp.ok).toBe(true);
 		expect(resp.data).toMatchObject({ approved: true, seq: 9 });
 		expect(deleteTask).not.toHaveBeenCalled();
+		// No pane reported, so the child is told replies cannot reach the asker.
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
+			source: expect.objectContaining({ agentUnavailable: expect.stringContaining("not run from a task terminal pane") }),
+		}));
 	});
 
 	it("discards the placeholder task when the user declines", async () => {

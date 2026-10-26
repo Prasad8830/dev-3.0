@@ -17,7 +17,7 @@ import { taskPeek } from "../task-peek";
 import { readTaskTerminalBackendState, switchTaskTerminalBackend } from "../task-terminal-backend-switch";
 import { approvalStatusOf, launchSuggestionRequested, launcherHandoffNote, requestAgentLaunchApproval, requestDestructiveApproval, resolveLaunchSuggestion } from "./approvals";
 import { log, type Handler } from "./shared";
-import { findByIdPrefix, findTaskByRef, resolveAgentMessageSource, resolveRequesterTask, resolveTaskAcrossProjects, resolveTaskFromParams, scopedTaskNotFoundError, taskNotFoundError, withArchivedHistory } from "./task-resolution";
+import { findByIdPrefix, findTaskByRef, resolveAgentMessageSource, resolveRequesterTask, resolveTaskAcrossProjects, resolveTaskFromParams, scopedTaskNotFoundError, taskNotFoundError, withArchivedHistory, withSenderAgent } from "./task-resolution";
 
 // Lazy like `conversationImport` (shared.ts): it reaches the app and spaces handler domains.
 async function projectRegistration() {
@@ -255,7 +255,7 @@ export const taskHandlers: Record<string, Handler> = {
 			project,
 			task,
 			targetStatus: "in-progress",
-			requester,
+			requester: await withSenderAgent(requester, params),
 			launcherNote: launcherHandoffNote(params),
 			suggested,
 		});
@@ -530,7 +530,7 @@ export const taskHandlers: Record<string, Handler> = {
 				project,
 				task,
 				targetStatus: builtinStatus,
-				requester,
+				requester: await withSenderAgent(requester, params),
 				launcherNote: launcherHandoffNote(params),
 				suggested: await resolveLaunchSuggestion(params),
 			});

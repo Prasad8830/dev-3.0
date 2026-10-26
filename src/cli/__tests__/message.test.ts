@@ -3,6 +3,7 @@ import { handleMessage } from "../commands/message";
 import type { CliContext } from "../context";
 import type { ParsedArgs } from "../args";
 import type { CliResponse } from "../../shared/types";
+import { encodeAgentHandle } from "../../shared/agent-handle";
 
 vi.mock("../socket-client", () => ({
 	sendRequest: vi.fn(),
@@ -62,9 +63,13 @@ beforeEach(() => {
 	}) as ReturnType<typeof vi.spyOn>;
 	mockSend.mockReset();
 	mockReadStdin.mockReset();
+	// The suite may itself run inside a tmux pane; only the tests about panes set one.
+	vi.stubEnv("TMUX_PANE", "");
+	vi.stubEnv("DEV3_PANE_ID", "");
 });
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	stdoutSpy.mockRestore();
 	stderrSpy.mockRestore();
 	exitSpy.mockRestore();
@@ -114,6 +119,75 @@ describe("message — immediate (bare form)", () => {
 		await expect(handleMessage(args(["hi"]), SOCKET, CTX)).rejects.toThrow("EXIT_1");
 		expect(stderrOutput).toContain("no live agent");
 	});
+
+	it("hands the app its own pane and pid on the immediate form too, so a reply can find this agent", async () => {
+		vi.stubEnv("TMUX_PANE", "%3");
+		mockSend.mockResolvedValue(okResp({ delivered: true, status: "held", taskId: "other", projectId: CTX.projectId }));
+		await handleMessage(args(["ping"], { task: "seq:42" }), SOCKET, CTX);
+		expect(mockSend.mock.calls[0]![2]).toMatchObject({ sourceTaskId: CTX.taskId, sourcePaneId: "%3", sourcePid: process.pid });
+	});
+
+	it("names the agent and pane it went to", async () => {
+		mockSend.mockResolvedValue(okResp({ delivered: true, status: "held", taskId: CTX.taskId, paneId: "%3", agentRole: "review" }));
+		await handleMessage(args(["ping"]), SOCKET, CTX);
+		expect(stdoutOutput).toContain("Message queued for task aaaaaaaa (AI Review agent, pane %3).");
+	});
+
+	it("says plainly when the receiver gets no way to reply to this agent", async () => {
+		mockSend.mockResolvedValue(okResp({
+			delivered: true, status: "held", taskId: "other", replyUnavailable: "agent identity cannot be verified on Windows yet",
+		}));
+		await handleMessage(args(["ping"], { task: "seq:42" }), SOCKET, CTX);
+		expect(stderrOutput).toContain(
+			"Replies to you are not available (agent identity cannot be verified on Windows yet): the message carries no reply command.",
+		);
+		expect(stdoutOutput).toContain("Message queued");
+	});
+
+	it("prints no reply notice when the sender was proven", async () => {
+		mockSend.mockResolvedValue(okResp({ delivered: true, status: "held", taskId: "other" }));
+		await handleMessage(args(["ping"], { task: "seq:42" }), SOCKET, CTX);
+		expect(stderrOutput).not.toContain("Replies to you");
+	});
+});
+
+describe("message — --agent addresses one agent of the task", () => {
+	const HANDLE = encodeAgentHandle({ paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" });
+
+	it("sends the handle along on both forms", async () => {
+		mockSend.mockResolvedValue(okResp({ delivered: true, status: "held", taskId: "other", pending: 1 }));
+		await handleMessage(args(["review it"], { task: "seq:42", agent: HANDLE }), SOCKET, CTX);
+		expect(mockSend.mock.calls[0]![2]).toMatchObject({ taskId: "seq:42", agentHandle: HANDLE });
+		await handleMessage(args(["review it"], { task: "seq:42", agent: HANDLE, in: "30m" }), SOCKET, CTX);
+		expect(mockSend.mock.calls[1]![1]).toBe("message.schedule");
+		expect(mockSend.mock.calls[1]![2]).toMatchObject({ agentHandle: HANDLE });
+	});
+
+	it("refuses a raw pane id or a bare flag, sending nothing", async () => {
+		for (const agent of ["%3", "true"]) {
+			stderrOutput = "";
+			await expect(handleMessage(args(["review it"], { task: "seq:42", agent }), SOCKET, CTX)).rejects.toThrow("EXIT_3");
+			expect(stderrOutput).toContain("dev3 pane list --task <id>");
+		}
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
+	it("refuses on Windows instead of falling back to the task", async () => {
+		const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		Object.defineProperty(process, "platform", { value: "win32" });
+		try {
+			await expect(handleMessage(args(["review it"], { task: "seq:42", agent: HANDLE }), SOCKET, CTX)).rejects.toThrow("EXIT_1");
+		} finally {
+			Object.defineProperty(process, "platform", platform);
+		}
+		expect(stderrOutput).toContain("--agent is not available on Windows yet");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
+	it("keeps --agent in the corrected command a missing subject prints", async () => {
+		await expect(handleMessage(rawArgs(["review it"], { task: "seq:42", agent: HANDLE }), SOCKET, CTX)).rejects.toThrow();
+		expect(stderrOutput).toContain(`--agent ${HANDLE}`);
+	});
 });
 
 describe("message — scheduled", () => {
@@ -125,6 +199,12 @@ describe("message — scheduled", () => {
 		expect(params!.text).toBe("later thing");
 		expect(new Date(params!.at as string).getTime()).toBeGreaterThan(Date.now());
 		expect(stdoutOutput).toContain("Message scheduled");
+	});
+
+	it("tells a scheduled sender, too, when replies cannot reach it", async () => {
+		mockSend.mockResolvedValue(okResp({ taskId: "other", pending: 1, replyUnavailable: "a shell, not an agent" }));
+		await handleMessage(args(["later"], { in: "30m", task: "seq:42" }), SOCKET, CTX);
+		expect(stderrOutput).toContain("Replies to you are not available (a shell, not an agent)");
 	});
 
 	it("hands the app its own tmux pane so a self-reminder can come back to this agent", async () => {

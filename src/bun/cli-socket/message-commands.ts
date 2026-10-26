@@ -1,9 +1,38 @@
 import { requireMessageSubject } from "../../shared/agent-message-subject";
 import { cancelScheduledMessageByRef, scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "../scheduled-message-scheduler";
-import { captureScheduledMessageAuthor } from "../scheduled-message-author";
+import {
+	AGENT_IDENTITY_UNSUPPORTED_DETAIL,
+	captureScheduledMessageAuthor,
+	resolveScheduledMessageAuthorPane,
+} from "../scheduled-message-author";
 import { toScheduledMessageListing } from "../../shared/scheduled-message-listing";
+import { decodeAgentHandle } from "../../shared/agent-handle";
+import type { AgentMessageSource, ScheduledMessageAuthor } from "../../shared/types";
 import type { Handler } from "./shared";
-import { messageVariantIndex, resolveAgentMessageSource, resolveTaskFromParams } from "./task-resolution";
+import { messageVariantIndex, resolveAgentMessageSource, resolveTaskFromParams, withSenderAgent } from "./task-resolution";
+
+/**
+ * The agent `--agent <handle>` names, or null when the message is task-addressed.
+ * Refused outright, with nothing sent, when the handle is malformed or this
+ * platform cannot verify an agent: an explicit address never degrades to the task.
+ */
+function addressedAgent(params: Record<string, unknown>): ScheduledMessageAuthor | null {
+	if (params.agentHandle === undefined || params.agentHandle === null) return null;
+	if (process.platform === "win32") throw new Error(`--agent: ${AGENT_IDENTITY_UNSUPPORTED_DETAIL}. Nothing was sent.`);
+	const author = typeof params.agentHandle === "string" ? decodeAgentHandle(params.agentHandle) : null;
+	if (!author) throw new Error("--agent: not an agent handle. Copy one from `dev3 pane list --task <id>`. Nothing was sent.");
+	return author;
+}
+
+/** The sender, stamped with its agent, plus why replies cannot reach that agent when they cannot. */
+async function stampedSource(params: Record<string, unknown>, targetTaskId: string): Promise<AgentMessageSource | null> {
+	const source = await resolveAgentMessageSource(params, targetTaskId);
+	return source ? withSenderAgent(source, params) : null;
+}
+
+function replyNotice(source: AgentMessageSource | null): { replyUnavailable?: string } {
+	return source && !source.agent && source.agentUnavailable ? { replyUnavailable: source.agentUnavailable } : {};
+}
 
 export const messageHandlers: Record<string, Handler> = {
 
@@ -17,12 +46,16 @@ export const messageHandlers: Record<string, Handler> = {
 		// better, so reaching this means an older `dev3` binary that never learned
 		// the flag — it gets the same explanation instead of writing a mute row.
 		const subject = requireMessageSubject(params.subject, text);
-		const source = await resolveAgentMessageSource(params, task.id);
-		const delivery = await sendMessageImmediately(task, text, null, source, { subject });
+		const author = addressedAgent(params);
+		const source = await stampedSource(params, task.id);
+		const delivery = await sendMessageImmediately(task, text, null, source, { subject, author });
 		return {
 			delivered: true,
 			status: delivery.status,
 			...(delivery.detail === undefined ? {} : { detail: delivery.detail }),
+			...(delivery.paneId ? { paneId: delivery.paneId } : {}),
+			...(delivery.agentRole ? { agentRole: delivery.agentRole } : {}),
+			...replyNotice(source),
 			taskId: task.id,
 			projectId: project.id,
 		};
@@ -36,21 +69,27 @@ export const messageHandlers: Record<string, Handler> = {
 		const at = (params.at as string) ?? "";
 		// Same gate as the immediate send: a delay changes nothing about the subject.
 		const subject = requireMessageSubject(params.subject, text);
-		const source = await resolveAgentMessageSource(params, task.id);
-		// Only a self-reminder is bound to its author: a message for another task
-		// is addressed to that task, whichever of its agents is live.
-		const author = params.sourceTaskId === task.id
+		const addressed = addressedAgent(params);
+		if (addressed) {
+			// Refused now, while the sender is listening, not hours later at fire time.
+			const live = await resolveScheduledMessageAuthorPane(task, addressed);
+			if (!live.ok) throw new Error(`Could not schedule the message — ${live.detail}.`);
+		}
+		const source = await stampedSource(params, task.id);
+		// An explicit `--agent` wins; otherwise only a self-reminder is bound to its
+		// author, since a message for another task is addressed to its main agent.
+		const author = addressed ?? (params.sourceTaskId === task.id
 			? await captureScheduledMessageAuthor(
 				task,
 				typeof params.sourcePaneId === "string" ? params.sourcePaneId : null,
 				typeof params.sourcePid === "number" ? params.sourcePid : null,
 			)
-			: null;
+			: null);
 		const updated = await scheduleMessageCore(project, task, { text, at, source, subject, author });
 		const queue = updated.scheduledMessages ?? [];
 		// Appended under the tasks-file lock, so the returned queue ends with ours.
 		const messageId = queue[queue.length - 1]?.id;
-		return { taskId: task.id, projectId: project.id, at, pending: queue.length, messageId };
+		return { taskId: task.id, projectId: project.id, at, pending: queue.length, messageId, ...replyNotice(source) };
 	},
 
 	// `dev3 message --list`: the target task's pending scheduled messages, earliest first.
