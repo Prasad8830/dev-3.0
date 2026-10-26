@@ -1,21 +1,28 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentUsageReport, SystemMemorySnapshot, WorktreeOrphanGroup } from "../../shared/types";
+import type { AgentUsageReport, AgentUsageSource, SystemMemorySnapshot, WorktreeOrphanGroup } from "../../shared/types";
 import type { AgentRateLimitsReport } from "../../shared/rate-limits";
 import { getAgentRateLimitsReport } from "../rate-limit-monitor";
 import { getBusyTaskShortIds, getSystemMemorySnapshot, resolveTaskConsumers } from "../resource-monitor";
 import { killPids, scanWorktreeOrphans as scanOrphans } from "../worktree-reaper";
 import { nativeModelIdForWireName } from "../../shared/model-catalog";
 import { loadModelCatalog } from "../model-catalog-store";
+import { listClaudeAccountDirs, listCodexAccountDirs } from "../agent-accounts";
+import { retainUsageHistory } from "../agent-usage-history";
+import { getPricingResolver } from "../agent-pricing-refresh";
+import { DEV3_HOME } from "../paths";
+import { resolveCopilotHome } from "../copilot-config";
+import { collectGeminiUsage } from "../usage-collectors/gemini";
+import { collectCursorUsage } from "../usage-collectors/cursor";
+import { collectCopilotUsage } from "../usage-collectors/copilot";
 import { beginCodexRollout, finalizeUsage, foldClaudeEntry, foldCodexEntry, newUsageState, type UsageState } from "./agent-usage-parse";
 import { log } from "./shared";
 
 /**
  * Agent usage (tokens + API-equivalent cost) reconstructed from LOCAL on-disk
- * agent state — no API calls. Covers Claude Code transcripts and Codex rollout
- * JSONL files, the same local sources the `ccusage` tool uses. Pure aggregation
- * lives in `agent-usage-parse.ts`; this file only walks the filesystem.
+ * agent state. Covers Claude, Codex, Gemini, Cursor hooks and Copilot accounting.
+ * Usage stays local; public pricing refreshes independently of the raw records.
  */
 
 /** Root of Claude Code's projects dir, honouring CLAUDE_CONFIG_DIR (used by the account switcher). */
@@ -24,10 +31,9 @@ function claudeProjectsDir(): string {
 	return join(base, "projects");
 }
 
-/** Root of Codex rollout sessions, honouring CODEX_HOME. */
-function codexSessionsDir(): string {
-	const base = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
-	return join(base, "sessions");
+/** Root of Codex state, honouring CODEX_HOME. */
+function codexHome(): string {
+	return process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 }
 
 /** Recursively collect every *.jsonl transcript under the projects dir. Never throws. */
@@ -75,25 +81,52 @@ function foldJsonlFiles(
 export async function getAgentUsage(): Promise<AgentUsageReport> {
 	const claudeState = newUsageState();
 	const claudeFiles: string[] = [];
-	collectTranscriptFiles(claudeProjectsDir(), claudeFiles);
+	for (const dir of new Set([claudeProjectsDir(), ...listClaudeAccountDirs().map((home) => join(home, "projects"))])) {
+		collectTranscriptFiles(dir, claudeFiles);
+	}
 	foldJsonlFiles(claudeFiles, claudeState, foldClaudeEntry);
 
 	const codexState = newUsageState();
 	const codexFiles: string[] = [];
-	collectTranscriptFiles(codexSessionsDir(), codexFiles, true);
+	for (const home of new Set([codexHome(), ...listCodexAccountDirs()])) {
+		for (const store of ["sessions", "archived_sessions"]) {
+			collectTranscriptFiles(join(home, store), codexFiles, true);
+		}
+	}
 	foldJsonlFiles(codexFiles, codexState, foldCodexEntry, beginCodexRollout);
+	const states = {
+		claude: claudeState, codex: codexState,
+		gemini: newUsageState(), cursor: newUsageState(), copilot: newUsageState(),
+	};
+	const collectors = [
+		() => collectGeminiUsage(states.gemini, homedir()),
+		() => collectCursorUsage(states.cursor, DEV3_HOME),
+		() => collectCopilotUsage(states.copilot, resolveCopilotHome()),
+	];
+	for (const collect of collectors) {
+		try { collect(); }
+		catch (error) { log.warn("Agent usage source unavailable", { error: String(error) }); }
+	}
 
 	// A routed session's transcript names the catalog wire name, which the rate
 	// table has never heard of; price it as the provider's own model instead.
 	const catalog = loadModelCatalog();
 	const pricingId = (model: string) => nativeModelIdForWireName(catalog, model) ?? model;
+	for (const state of Object.values(states)) {
+		for (const usage of state.records.values()) {
+			const native = nativeModelIdForWireName(catalog, usage.model);
+			if (native) usage.pricingModel = native;
+		}
+	}
 
-	const claude = finalizeUsage(claudeState, "claude", pricingId);
-	const codex = finalizeUsage(codexState, "codex", pricingId);
-	const days = [...claude.days, ...codex.days].sort(
+	const retained = await retainUsageHistory(states);
+	const resolveRate = await getPricingResolver();
+	const reports = (Object.entries(retained) as [AgentUsageSource, UsageState][])
+		.map(([source, state]) => finalizeUsage(state, source, pricingId, resolveRate));
+	const days = reports.flatMap((report) => report.days).sort(
 		(a, b) => a.startMs - b.startMs || a.source.localeCompare(b.source),
 	);
-	const hasUnpriced = claude.hasUnpriced || codex.hasUnpriced;
+	const hasUnpriced = reports.some((report) => report.hasUnpriced);
 	log.info("getAgentUsage computed", {
 		claudeFiles: claudeFiles.length,
 		codexFiles: codexFiles.length,

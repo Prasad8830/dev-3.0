@@ -40,6 +40,7 @@ import { handleInlineHtml } from "./commands/inline-html";
 import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
 import { handleCopilotHook } from "./commands/copilot-hook";
+import { handleCursorUsage } from "./commands/cursor-usage";
 import { handleExtensionHook } from "./commands/extension-hook";
 import { handleClaudePrompt } from "./commands/claude-prompt";
 import { handleClaudeTurnEnded } from "./commands/claude-turn-ended";
@@ -142,7 +143,7 @@ Commands:
   dev3 config export                     Export settings to .dev3/config.json
   dev3 doctor [--json]                   Check install health (app bundle, tmux shim, brew state); works without the app running
   dev3 doctor --processes [--json]       Which task owns each native terminal host/shell (seq, pane, role, pid, liveness)
-  dev3 install-hooks                     Install Claude worktree hooks, stable Codex user hooks and the omp status extension
+  dev3 install-hooks [--remove-cursor]   Install agent hooks, or remove global Cursor usage hooks
   dev3 install-skills                    Install agent skills globally
   dev3 projects list [--json]           List all projects with the spaces they belong to
   dev3 projects add <path> [--name "..."] [--space <id|name>]... [--new-space "..."]... [--no-space] [--init] [--json]
@@ -243,6 +244,11 @@ async function main(): Promise<void> {
 
 	const command = rawArgs[0];
 	const subcommand = rawArgs[1] && !rawArgs[1].startsWith("--") ? rawArgs[1] : undefined;
+	if (command === "hook" && subcommand === "cursor-usage") {
+		try { handleCursorUsage(await Bun.stdin.text()); }
+		catch { /* Accounting remains successful if stdin cannot be read. */ }
+		return;
+	}
 	const restArgs = subcommand ? rawArgs.slice(2) : rawArgs.slice(1);
 	const args = resolveFileArgs(parseArgs(restArgs));
 
@@ -266,7 +272,7 @@ async function main(): Promise<void> {
 		return await handleNoteRecent(args, socketPath || context?.socketPath || null, context);
 	}
 	if (command === "install-hooks") {
-		return await handleInstallHooks();
+		return await handleInstallHooks({ removeCursor: args.flags["remove-cursor"] === "true" });
 	}
 	if (command === "statusline") {
 		// Internal: Claude Code statusLine wrapper (see commands/statusline.ts).
