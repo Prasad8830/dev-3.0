@@ -3722,6 +3722,30 @@ describe("handlers.editTask", () => {
 		}));
 	});
 
+	it("persists a role-aware automatic title without treating it as a user rename", async () => {
+		const project = makeProject();
+		const task = makeTask({ status: "todo", draft: true, customTitle: null });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(data.updateTask).mockResolvedValue(task);
+		await handlers.editTask({ taskId: "task-1", projectId: "proj-1", description: "You are the BOARD CLEANUP adviser.", title: "Board cleanup", customTitle: null, taskType: "board-cleanup" });
+		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", expect.objectContaining({ title: "Board cleanup", taskType: "board-cleanup" }));
+		expect(vi.mocked(data.updateTask).mock.calls[0][2]).not.toMatchObject({ titleEditedByUser: true });
+	});
+
+	it("saves a draft role with its brief and clears it when requested", async () => {
+		const project = makeProject();
+		const task = makeTask({ status: "todo", draft: true });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(data.updateTask).mockResolvedValue(task);
+		await handlers.editTask({ taskId: "task-1", projectId: "proj-1", taskType: "board-cleanup", description: "Audit brief" });
+		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", expect.objectContaining({ taskType: "board-cleanup", description: "Audit brief" }));
+		vi.mocked(data.getTask).mockResolvedValue({ ...task, taskType: "board-cleanup" });
+		await handlers.editTask({ taskId: "task-1", projectId: "proj-1", taskType: null });
+		expect(data.updateTask).toHaveBeenLastCalledWith(project, "task-1", expect.objectContaining({ taskType: null }));
+	});
+
 	it("converts a scratch task into a normal task when its description is edited", async () => {
 		const project = makeProject();
 		const task = makeTask({ status: "todo", scratch: true, description: "Scratch — 15:50" });

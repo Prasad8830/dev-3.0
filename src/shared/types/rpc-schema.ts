@@ -647,11 +647,13 @@ export type AppRPCSchema = {
 					taskId: string;
 					projectId: string;
 					description?: string;
+					title?: string;
 					customTitle?: string | null;
 					priority?: TaskPriority;
 					labelIds?: string[];
 					existingBranch?: string | null;
 					draft?: boolean;
+					taskType?: TaskType | null;
 				};
 				response: Task;
 			};

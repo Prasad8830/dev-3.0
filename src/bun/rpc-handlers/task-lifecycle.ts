@@ -1,7 +1,7 @@
 import type { ReviewedPullRequest, AgentCancellationRequest, AgentCompletionRequest, AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskResetConsent, TaskResetResult, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
 import type { TerminalBackendIdentity } from "../../shared/terminal-backend-identity";
 import { isTaskSoundEnabled } from "../../shared/task-sound-statuses";
-import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, reviewTaskTitle } from "../../shared/types";
+import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, normalizeTaskType, reviewTaskTitle } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
@@ -860,11 +860,13 @@ async function editTask(params: {
 	taskId: string;
 	projectId: string;
 	description?: string;
+	title?: string;
 	customTitle?: string | null;
 	priority?: TaskPriority;
 	labelIds?: string[];
 	existingBranch?: string | null;
 	draft?: boolean;
+	taskType?: TaskType | null;
 }): Promise<Task> {
 	log.info("→ editTask", { taskId: params.taskId, draft: params.draft });
 	const project = await data.getProject(params.projectId);
@@ -881,6 +883,9 @@ async function editTask(params: {
 		throw new Error("A draft needs a description before it can become a runnable task");
 	}
 	if (params.labelIds !== undefined) await assertKnownLabelIds(project, task, params.labelIds);
+	if (params.taskType != null && normalizeTaskType(params.taskType) !== params.taskType) {
+		throw new Error(`Invalid task type "${params.taskType}"`);
+	}
 
 	const { task: updated, result: applied } = await data.updateTaskWith(project, task.id, (current) => {
 		// Only the UI reaches this RPC, so a typed title is a real user edit and
@@ -889,6 +894,8 @@ async function editTask(params: {
 			...(params.customTitle !== undefined ? { title: { value: params.customTitle } } : {}),
 			...(params.description !== undefined ? { description: params.description } : {}),
 		}, USER_ACTOR, { fallbackTitle: () => draftPlaceholderTitle() });
+		const customTitle = params.customTitle === undefined ? current.customTitle : params.customTitle;
+		if (!customTitle && params.title?.trim()) updates.title = params.title.trim();
 		if (params.priority !== undefined) updates.priority = params.priority;
 		if (params.labelIds !== undefined) updates.labelIds = params.labelIds;
 		if (params.existingBranch !== undefined) {
@@ -896,6 +903,7 @@ async function editTask(params: {
 			updates.baseBranch = data.deriveTaskBaseBranch(project, params.existingBranch);
 		}
 		if (params.draft !== undefined) updates.draft = params.draft;
+		if (params.taskType !== undefined) updates.taskType = params.taskType;
 		const changed = withoutUnchanged(current, updates);
 		return { updates: changed, result: Object.keys(changed).length > 0 };
 	});

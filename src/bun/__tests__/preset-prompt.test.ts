@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, resolvePresetPrompt, reviewTaskTitle, reviewTitleTopic } from "../../shared/types";
+import { BOARD_CLEANUP_PROMPT, presetPromptForTaskType, presetPromptSourceForTaskType, COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, resolvePresetPrompt, reviewTaskTitle, reviewTitleTopic } from "../../shared/types";
 import { CLI_EXIT_CODE_LAUNCH_DECLINED } from "../../shared/cli-exit-codes";
 import { COORDINATOR_PROMPT_LIMIT } from "../../shared/agent-command-line-budget";
 
@@ -399,5 +399,31 @@ describe("reviewTitleTopic", () => {
 		expect(reviewTitleTopic(null)).toBe("");
 		expect(reviewTitleTopic("   \n ")).toBe("");
 		expect(reviewTitleTopic("feat:")).toBe("");
+	});
+});
+
+
+describe("board cleanup brief", () => {
+	it("does not inherit a coordinator or review override", () => {
+		const overrides = { coordinatorPrompt: "Delegate everything", reviewModePrompt: "Review code" };
+		expect(presetPromptForTaskType("board-cleanup", overrides, overrides)).toBe(BOARD_CLEANUP_PROMPT);
+		expect(presetPromptSourceForTaskType("board-cleanup", overrides, overrides)).toBe("built-in");
+	});
+
+	it("keeps inspection passive, project-scoped and evidence-driven", () => {
+		expect(BOARD_CLEANUP_PROMPT).toContain("Scope: this project; all projects ONLY on explicit request");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Operations alone grants no wider scope");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Audit is read-only: no waking, starting, resuming, spawning, messaging, interrupting or mutating other agents/tasks");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Page EVERY open task");
+		for (const action of ["COMPLETE:", "CANCEL:", "KEEP:", "INVESTIGATE:"]) expect(BOARD_CLEANUP_PROMPT).toContain(action);
+		expect(BOARD_CLEANUP_PROMPT).toContain("Age, silence, review status, local commits, tests and open PRs prove nothing");
+		expect(BOARD_CLEANUP_PROMPT).toContain("code PRs merged, no remaining scope/unique work");
+	});
+
+	it("requires exact chat approval before even opening destructive dialogs", () => {
+		expect(BOARD_CLEANUP_PROMPT).toContain("Get exact task/action approval in chat BEFORE destructive requests");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Re-read selected targets, re-check preservation/runtime");
+		expect(BOARD_CLEANUP_PROMPT).toContain("stop if changed");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Publish report + own durable");
 	});
 });
