@@ -71,6 +71,12 @@ function agentExits(rootPid: number): void {
 	procs.find((p) => p.pid === rootPid)!.args = "-zsh";
 }
 
+/** The agent in `rootPid` exited, then the user typed the agent's command again into the leftover shell. */
+function agentRelaunchedByHand(rootPid: number, args: string): void {
+	agentExits(rootPid);
+	procs.push({ pid: rootPid + 70, ppid: rootPid, args, start: "Mon Oct  5 11:00:00 2026" });
+}
+
 function sig(pid: number): string {
 	const p = procs.find((x) => x.pid === pid);
 	return p ? `${pid}@${(p.start ?? "Mon Oct  5 09:00:00 2026").replace(/\s+/g, " ")}` : "";
@@ -193,6 +199,11 @@ describe("liveAgentPaneIds — which panes really run an agent", () => {
 		procs.push({ pid: 600, ppid: 50, args: "/bin/zsh" }, { pid: 601, ppid: 600, args: "bun test" });
 		nativePanes(["pane-1", 100, true], ["pane-2", 600, true]);
 		expect(await liveAgentPaneIds(native())).toEqual(["pane-1"]);
+	});
+
+	it("tmux: the agent started again by hand in the leftover shell counts", async () => {
+		agentRelaunchedByHand(100, "claude");
+		expect(await liveAgentPaneIds(task([pane("%1", "conv-a")]))).toEqual(["%1"]);
 	});
 
 	it("tmux: both recorded agents count", async () => {
@@ -348,6 +359,11 @@ describe("taskMainAgentLiveness — what the keep-alive watchdog may conclude", 
 		expect(await taskMainAgentLiveness(task())).toBe("exited");
 	});
 
+	it("sees the main agent alive when the user started it again by hand in the leftover shell", async () => {
+		agentRelaunchedByHand(100, "/Users/me/.local/bin/claude --resume conv-a");
+		expect(await taskMainAgentLiveness(task())).toBe("alive");
+	});
+
 	it("is unknown, never exited, while a setup script runs ahead of the agent", async () => {
 		procs = procs.filter((p) => p.ppid !== 100);
 		procs.find((p) => p.pid === 100)!.args = "/opt/homebrew/bin/zsh /tmp/dev3-task-startup.sh";
@@ -437,6 +453,26 @@ describe("readPaneAgentIdentity — the agent a pane runs now", () => {
 	it("proves the agent exited once its pane is the bare shell the script hands over to", async () => {
 		agentExits(100);
 		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "no-agent", detail: expect.stringContaining("has exited") });
+	});
+
+	it("names the agent the user started again by hand in the shell the script handed over to", async () => {
+		agentRelaunchedByHand(100, "claude");
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: true, author: { paneId: "%1", agentProcess: sig(170) } });
+	});
+
+	it("names a hand-started agent run through its script runtime (`node …/codex`)", async () => {
+		const codexTask = task([{ ...pane("%1", null), agentCmd: "/usr/local/bin/codex" }]);
+		agentRelaunchedByHand(100, "node /usr/local/bin/codex resume");
+		expect(await readPaneAgentIdentity(codexTask, "%1")).toMatchObject({ ok: true, author: { agentProcess: sig(170) } });
+	});
+
+	it("still proves the exit when the leftover shell runs some other program, even one naming the agent", async () => {
+		for (const args of ["vim notes.md", "less claude", "codex"]) {
+			machine();
+			agentRelaunchedByHand(100, args);
+			expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "no-agent" });
+			expect(await taskMainAgentLiveness(task())).toBe("exited");
+		}
 	});
 
 	it("names the NEW agent after a replacement in the same pane, and the old handle is refused", async () => {

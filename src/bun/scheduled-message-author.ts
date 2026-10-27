@@ -28,6 +28,7 @@ export type AgentIdentity =
 /** Why nothing is captured on Windows: the identity is `pid@start`, and only `ps` reads that today. */
 export const AGENT_IDENTITY_UNSUPPORTED_DETAIL = "agent identity cannot be verified on Windows yet";
 
+const SCRIPT_RUNTIMES = new Set(["node", "bun", "deno", "python", "python3"]);
 const SHELLS = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh", "powershell"]);
 const MAX_ANCESTRY = 64;
 
@@ -142,8 +143,9 @@ export async function captureScheduledMessageAuthor(
 
 /**
  * The agent running in `paneId` right now: the non-shell child of its launch
- * script. `no-agent` only on proof, the root having become the bare shell the
- * script hands over to; a setup script still running or a failed `ps` is `unknown`.
+ * script, or the same agent started again by hand in the shell it handed over to.
+ * `no-agent` only on proof, that shell running no such agent; a setup script
+ * still running or a failed `ps` is `unknown`.
  */
 export async function readPaneAgentIdentity(task: Task, paneId: string): Promise<AgentIdentity> {
 	if (process.platform === "win32") return unproven("unsupported", AGENT_IDENTITY_UNSUPPORTED_DETAIL);
@@ -151,7 +153,11 @@ export async function readPaneAgentIdentity(task: Task, paneId: string): Promise
 	if (!root) return unproven("unknown", `pane ${paneId} could not be read`);
 	const table = await processTable();
 	if (!table.cmdlines.has(root.rootPid)) return unproven("unknown", "the process table could not be read");
-	if (isHandedOverShell(table, root.rootPid)) return unproven("no-agent", `the agent in pane ${paneId} has exited`);
+	if (isHandedOverShell(table, root.rootPid)) {
+		const relaunched = relaunchedAgentPid(task, paneId, table, root.rootPid);
+		if (!relaunched) return unproven("no-agent", `the agent in pane ${paneId} has exited`);
+		return identityOf(task, paneId, root, relaunched);
+	}
 	const agentPid = (table.childrenOf.get(root.rootPid) ?? []).find((pid) => !isShell(table, pid));
 	if (!agentPid) return unproven("unknown", `no agent process is running in pane ${paneId} yet`);
 	return identityOf(task, paneId, root, agentPid);
@@ -198,9 +204,12 @@ export async function liveAgentPaneIds(task: Task): Promise<string[] | null> {
 		const root = await paneRoot(task, paneId);
 		if (!root) continue;
 		if (!table.cmdlines.has(root.rootPid)) return null; // `ps` failed or raced the pane
-		// A pane whose root is a bare interactive shell is a shell, whatever it runs: an agent pane's
-		// root is its launch script, which only becomes such a shell once the agent has ended.
-		if (isHandedOverShell(table, root.rootPid)) continue;
+		// A pane whose root is a bare interactive shell is a shell once its agent has ended: an agent
+		// pane's root is its launch script. Only the same agent started there again by hand counts.
+		if (isHandedOverShell(table, root.rootPid)) {
+			if (relaunchedAgentPid(task, paneId, table, root.rootPid)) live.push(paneId);
+			continue;
+		}
 		if ((table.childrenOf.get(root.rootPid) ?? []).some((pid) => !isShell(table, pid))) live.push(paneId);
 	}
 	return live;
@@ -215,10 +224,30 @@ function isHandedOverShell(table: ProcessTable, pid: number): boolean {
 	return words.length === 1 && isShell(table, pid);
 }
 
+function binaryName(word: string | undefined): string {
+	return (word?.split(/[\\/]/).pop() ?? "").replace(/\.exe$/i, "").toLowerCase();
+}
+
+/**
+ * The agent the user started again by hand in the shell an exited agent left
+ * behind: a child of that shell running the binary dev3 launched in this pane
+ * (`claude`, or `node …/codex`). Any other program there is not the agent.
+ */
+function relaunchedAgentPid(task: Task, paneId: string, table: ProcessTable, rootPid: number): number | null {
+	const launched = binaryName(task.sessionState?.panes.find((p) => p.paneId === paneId)?.agentCmd?.trim().split(/\s+/)[0]);
+	if (!launched || SHELLS.has(launched)) return null;
+	for (const pid of table.childrenOf.get(rootPid) ?? []) {
+		const [exe, script] = (table.cmdlines.get(pid)?.trim().split(/\s+/) ?? []).map(binaryName);
+		if (exe === launched || (SCRIPT_RUNTIMES.has(exe ?? "") && script === launched)) return pid;
+	}
+	return null;
+}
+
 /**
  * The task's MAIN agent, seen through the shell that outlives it (`keepShell`).
  * `exited` is proof, not absence of evidence: the pane's launch script has been
- * replaced by the interactive shell it hands over to only after the agent ends.
+ * replaced by the interactive shell it hands over to only after the agent ends,
+ * and that shell runs no agent the user started again by hand.
  * Anything a probe cannot establish — no pane id, tmux or `ps` failing, a setup
  * script still running, Windows (no `ps`) — is `unknown`, because the watchdog
  * tears the terminal down on `exited`.
@@ -231,7 +260,7 @@ export async function taskMainAgentLiveness(task: Task): Promise<MainAgentLivene
 	if (!root) return "unknown";
 	const table = await processTable();
 	if (!table.cmdlines.has(root.rootPid)) return "unknown"; // `ps` failed, timed out, or raced the pane
-	if (isHandedOverShell(table, root.rootPid)) return "exited";
+	if (isHandedOverShell(table, root.rootPid)) return relaunchedAgentPid(task, paneId, table, root.rootPid) ? "alive" : "exited";
 	return (table.childrenOf.get(root.rootPid) ?? []).some((pid) => !isShell(table, pid)) ? "alive" : "unknown";
 }
 
