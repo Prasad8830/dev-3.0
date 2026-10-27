@@ -129,7 +129,8 @@ const COMMANDS: CommandHelp[] = [
 					"--notes      Inline the task's note bodies.",
 					"--history    Show the title/overview change log.",
 					"--json       Stable machine-readable object (schemaVersion 1): id, seq, title,",
-					"             raw description, overview, status, branch, labelIds, priority, ...",
+					"             raw description, overview, status, branch, labelIds, priority,",
+					"             prStatus (last PR poll), hibernated, keepAlive, ...",
 					"             --notes / --history add those arrays to it.",
 					"Without an id, targets the current worktree's task.",
 				],
@@ -374,6 +375,75 @@ const COMMANDS: CommandHelp[] = [
 			"The cursor is never guessed: an unparseable --from exits 19 and reads nothing, rather than falling back to a window.",
 			"Cursor precision is milliseconds on purpose — 73 individual seconds on this board carry more than one note, so a second-precision cursor would skip or repeat them.",
 			"One line per event — `dev3 note show <id> --task <seq>` prints the full body.",
+		],
+	},
+	{
+		name: "stats",
+		summary: "Read-only numbers behind the Stats page and the memory widget.",
+		subcommands: [
+			{
+				name: "productivity",
+				usage: "dev3 stats productivity [--project <id>] [--since <duration|date>] [--json]",
+				summary: "One record per task: status, lines changed, moves, focus time.",
+				details: [
+					"Every project by default; --project narrows to one, and an id that matches no project fails rather than printing nothing.",
+					"--since 7d keeps tasks created, moved or changed status since then (also 12h, 2w; a date like 2026-10-01 is local midnight, a timestamp like 2026-10-01T09:00:00 is UTC).",
+					"Active tasks report a live worktree diff, so a large board takes a few seconds.",
+					"--json prints { schemaVersion: 1, ... }; new fields may appear, a removed or renamed one bumps schemaVersion.",
+				],
+			},
+			{
+				name: "usage",
+				usage: "dev3 stats usage [--since <duration|date>] [--json]",
+				summary: "Tokens and API-equivalent cost per agent per day, read from local agent transcripts.",
+				details: [
+					"Usage is recorded per agent and day, not per project, so there is no --project.",
+					"--json prints { schemaVersion: 1, ... }; new fields may appear, a removed or renamed one bumps schemaVersion.",
+				],
+			},
+			{
+				name: "limits",
+				usage: "dev3 stats limits [--json]",
+				summary: "Rate-limit windows per agent account: used %, reset time, when the reading was captured.",
+				details: [
+					"In --json, generatedAt is ISO; capturedAt and resetsAt inside each snapshot are epoch ms, as recorded.","--json prints { schemaVersion: 1, ... }; new fields may appear, a removed or renamed one bumps schemaVersion.",],
+			},
+			{
+				name: "memory",
+				usage: "dev3 stats memory [--json]",
+				summary: "System memory pressure, headroom, swap and the heaviest live tasks.",
+				details: [
+					"Empty for a few seconds after the app starts, until its first sample (--json: snapshot is null).",
+					"--json prints { schemaVersion: 1, ... }; new fields may appear, a removed or renamed one bumps schemaVersion.",
+				],
+			},
+			{
+				name: "prices",
+				usage: "dev3 stats prices [--model <id> ...] [--json]",
+				summary: "The model prices usage cost is computed with, USD per 1M tokens.",
+				details: [
+					"--model <id>  Repeatable. Each id is resolved exactly as the usage report prices it (catalog wire names, family and prefix rules, [1m] and dated ids); an unknown one is priced: false. Exit 0 either way.",
+					"No --model: every model id seen in local agent usage.",
+					"--json: { schemaVersion: 1, currency, unit, source: built-in|refreshed, fetchedAt, models: [{ model, priced, input, output, cacheWrite5m, cacheWrite1h, cacheRead }] }.",
+					"Reads the saved price table only — it never fetches prices itself.",
+					"--json prints { schemaVersion: 1, ... }; new fields may appear, a removed or renamed one bumps schemaVersion.",
+				],
+			},
+		],
+	},
+	{
+		name: "approvals",
+		summary: "Requests waiting for the user's answer: complete, cancel, reset, launch.",
+		subcommands: [
+			{
+				name: "list",
+				usage: "dev3 approvals list [--project <id>] [--json]",
+				summary: "List pending approval dialogs, oldest first. Read only — it never answers one.",
+				details: [
+					"Requests live in the running app's memory: an app restart drops them, and the requester re-asks.",
+					"--json prints { schemaVersion: 1, projectId, requests: [...] }; times are ISO, and a launch names its requester by task id and seq, or by sender id.",
+				],
+			},
 		],
 	},
 	{

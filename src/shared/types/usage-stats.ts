@@ -10,6 +10,8 @@ import type { TaskMovement } from "./task-notes";
  */
 export interface ProductivityStatEvent {
 	taskId: string;
+	/** Per-project sequential id, as `dev3 task show <seq>` takes it. */
+	seq: number;
 	projectId: string;
 	projectName: string;
 	projectKind: "git" | "virtual";
@@ -90,4 +92,6 @@ export interface AgentUsageReport {
 	generatedAt: string;
 	/** True if some parsed usage referenced a model with no known price (costUsd is a lower bound). */
 	hasUnpricedModels: boolean;
+	/** Every raw model id seen in the retained usage, distinct and sorted. */
+	models: string[];
 }
