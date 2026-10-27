@@ -66,7 +66,7 @@ export interface ScheduledMessageAuthor {
 	sessionId: string | null;
 	/** The pane's generation: tmux server token, or the native registry session id. */
 	paneToken: string;
-	/** Start signature (`pid@lstart`) of the agent process itself. */
+	/** Start signature of the agent process itself: `pid@linux:<boot id>:<start tick>` on Linux, `pid@<ps lstart>` elsewhere. */
 	agentProcess: string;
 }
 

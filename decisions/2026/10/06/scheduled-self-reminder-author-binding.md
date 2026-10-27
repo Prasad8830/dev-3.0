@@ -1,5 +1,7 @@
 # Bind a scheduled self-reminder to the agent process that queued it
 
+Superseded in part on 2026-10-27 by `decisions/2026/10/27/agent-signature-from-proc-start-tick.md`: on Linux `agentProcess` is `pid@linux:<boot id>:<start tick>`, not `pid@lstart`.
+
 ## 1. Context
 `dev3 message --in/--at` stored every queued message as `{ kind: "agent" }`, and the fire resolved that by focus (`resolveAgentPromptTargetPane`: last-focused agent pane first; native always `pane-1`). In a task with two agents, agent A's wake-up reached agent B (seq 2091). Cross-task addressing (#1809) is out of scope.
 

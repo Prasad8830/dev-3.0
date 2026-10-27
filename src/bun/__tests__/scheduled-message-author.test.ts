@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../pane-input", () => ({ pinTaskPane: vi.fn() }));
 vi.mock("../port-scanner", () => ({ collectProcessInfo: vi.fn() }));
-vi.mock("../spawn", () => ({ spawn: vi.fn() }));
+vi.mock("../agent-process-signature", () => ({ readAgentProcessSignature: vi.fn(), isSameAgentProcess: vi.fn() }));
 vi.mock("../native-task-panes", () => ({ nativeTaskPanesState: vi.fn() }));
 vi.mock("../tmux", () => ({
 	DEFAULT_TMUX_SOCKET: "dev3",
@@ -13,7 +13,7 @@ vi.mock("../tmux", () => ({
 
 import { pinTaskPane } from "../pane-input";
 import { collectProcessInfo } from "../port-scanner";
-import { spawn } from "../spawn";
+import { isSameAgentProcess, readAgentProcessSignature } from "../agent-process-signature";
 import { nativeTaskPanesState } from "../native-task-panes";
 import { tmux } from "../tmux";
 import {
@@ -108,11 +108,9 @@ beforeEach(() => {
 		}
 		return { tree, cmdlines, resources: new Map() };
 	});
-	// `ps -p PID -o lstart=` as the real binary answers it: the start time, or exit 1.
-	vi.mocked(spawn).mockImplementation(((cmd: string[]) => {
-		const start = sig(Number(cmd[2])).split("@")[1] ?? "";
-		return { stdout: new Response(start ? `${start}\n` : "").body, exited: Promise.resolve(start ? 0 : 1) };
-	}) as never);
+	// The start signature as the real reader answers it: "" once the process is gone.
+	vi.mocked(readAgentProcessSignature).mockImplementation(async (pid) => sig(pid));
+	vi.mocked(isSameAgentProcess).mockImplementation(async (signature) => sig(Number(signature.split("@")[0])) === signature);
 	vi.mocked(nativeTaskPanesState).mockResolvedValue(null);
 });
 

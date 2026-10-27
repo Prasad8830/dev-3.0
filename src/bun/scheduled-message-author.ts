@@ -10,7 +10,7 @@ import type { ScheduledMessageAuthor, Task } from "../shared/types";
 import { pinTaskPane } from "./pane-input";
 import { taskTerminalBackendIdentity } from "./task-terminal-backend";
 import { collectProcessInfo } from "./port-scanner";
-import { spawn } from "./spawn";
+import { isSameAgentProcess, readAgentProcessSignature } from "./agent-process-signature";
 import { NATIVE_AGENT_PANE_ID } from "./agent-prompt-native";
 import { nativeTaskPanesState } from "./native-task-panes";
 import { DEFAULT_TMUX_SOCKET, PANE_ID_PID_FORMAT, taskSessionName, tmux } from "./tmux";
@@ -25,25 +25,12 @@ export type AgentIdentity =
 	| { ok: true; author: ScheduledMessageAuthor }
 	| { ok: false; reason: "unsupported" | "no-agent" | "unknown"; detail: string };
 
-/** Why nothing is captured on Windows: the identity is `pid@start`, and only `ps` reads that today. */
+/** Why nothing is captured on Windows: the identity is `pid@start`, and only `ps` or `/proc` read that today. */
 export const AGENT_IDENTITY_UNSUPPORTED_DETAIL = "agent identity cannot be verified on Windows yet";
 
 const SCRIPT_RUNTIMES = new Set(["node", "bun", "deno", "python", "python3"]);
 const SHELLS = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh", "powershell"]);
 const MAX_ANCESTRY = 64;
-
-/** `pid@<ps lstart>`: a recycled pid has a different start time, so it never matches. "" when gone. */
-async function readProcessStartSignature(pid: number): Promise<string> {
-	if (!Number.isInteger(pid) || pid <= 0) return "";
-	try {
-		const proc = spawn(["ps", "-p", String(pid), "-o", "lstart="], { stdout: "pipe", stderr: "ignore" });
-		const [raw, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-		const start = raw.trim().replace(/\s+/g, " ");
-		return exitCode === 0 && start ? `${pid}@${start}` : "";
-	} catch {
-		return "";
-	}
-}
 
 type ProcessTable = { parentOf: Map<number, number>; childrenOf: Map<number, number[]>; cmdlines: Map<number, string> };
 
@@ -105,7 +92,7 @@ function unproven(reason: "unsupported" | "no-agent" | "unknown", detail: string
 }
 
 async function identityOf(task: Task, paneId: string, root: PaneRoot, agentPid: number): Promise<AgentIdentity> {
-	const agentProcess = await readProcessStartSignature(agentPid);
+	const agentProcess = await readAgentProcessSignature(agentPid);
 	if (!agentProcess) return unproven("unknown", "the agent process ended while it was being identified");
 	const sessionId = task.sessionState?.panes.find((p) => p.paneId === paneId)?.sessionId ?? null;
 	return { ok: true, author: { paneId, sessionId, paneToken: root.paneToken, agentProcess } };
@@ -161,10 +148,6 @@ export async function readPaneAgentIdentity(task: Task, paneId: string): Promise
 	const agentPid = (table.childrenOf.get(root.rootPid) ?? []).find((pid) => !isShell(table, pid));
 	if (!agentPid) return unproven("unknown", `no agent process is running in pane ${paneId} yet`);
 	return identityOf(task, paneId, root, agentPid);
-}
-
-function signaturePid(signature: string): number {
-	return Number.parseInt(signature.split("@")[0] ?? "", 10);
 }
 
 /** Does `paneId` run an agent right now — a live non-shell child of its launch script? */
@@ -276,9 +259,7 @@ export async function resolveScheduledMessageAuthorPane(task: Task, author: Sche
 	const who = `the addressed agent (pane ${author.paneId}${author.sessionId ? `, session ${author.sessionId.slice(0, 8)}` : ""})`;
 	const gone: AuthorPaneResolution = { ok: false, detail: `${who} is no longer running in this task; not sent to another pane` };
 
-	const pid = signaturePid(author.agentProcess);
-	const current = await readProcessStartSignature(pid);
-	if (current && current === author.agentProcess) {
+	if (await isSameAgentProcess(author.agentProcess)) {
 		const root = await paneRoot(task, author.paneId);
 		if (root && root.paneToken === author.paneToken) return { ok: true, paneId: author.paneId };
 		return gone;
